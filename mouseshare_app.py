@@ -167,6 +167,19 @@ class MousehareApp:
                         lightcolor=p["line"], darkcolor=p["line"], padding=7)
         style.map("Mousehare.TCombobox", fieldbackground=[("readonly", p["field"])],
                   foreground=[("readonly", p["text"])])
+        style.configure("Mousehare.Readonly.TEntry", fieldbackground=p["field"],
+                        foreground=p["text"], insertcolor=p["text"],
+                        bordercolor=p["line"], lightcolor=p["line"],
+                        darkcolor=p["line"], padding=8, relief="flat")
+        style.map("Mousehare.Readonly.TEntry",
+                  fieldbackground=[("readonly", p["field"])],
+                  foreground=[("readonly", p["text"])])
+        style.configure("Mousehare.Vertical.TScrollbar", background=p["panel2"],
+                        troughcolor=p["bg"], bordercolor=p["line"],
+                        arrowcolor=p["muted"], lightcolor=p["panel2"],
+                        darkcolor=p["line"], width=12)
+        style.map("Mousehare.Vertical.TScrollbar",
+                  background=[("active", p["accent"])])
 
     def _build_shell(self) -> None:
         for child in self.root.winfo_children():
@@ -203,9 +216,30 @@ class MousehareApp:
                  fg=p["muted"], justify="left", font=("Arial", 9)).pack(
                      side="bottom", anchor="w", padx=18, pady=20)
 
-        self.content = tk.Frame(shell, bg=p["bg"])
-        self.content.pack(side="left", fill="both", expand=True, padx=22, pady=18)
+        self.content_area = tk.Frame(shell, bg=p["bg"])
+        self.content_area.pack(side="left", fill="both", expand=True, padx=22, pady=18)
         self._draw_status_bar()
+
+        self.page_scrollbar = ttk.Scrollbar(
+            self.content_area, orient="vertical", style="Mousehare.Vertical.TScrollbar"
+        )
+        self.page_scrollbar.pack(side="right", fill="y")
+        self.page_canvas = tk.Canvas(
+            self.content_area, bg=p["bg"], highlightthickness=0,
+            yscrollcommand=self.page_scrollbar.set,
+        )
+        self.page_canvas.pack(side="left", fill="both", expand=True)
+        self.page_scrollbar.configure(command=self.page_canvas.yview)
+
+        self.content = tk.Frame(self.page_canvas, bg=p["bg"])
+        self.page_window = self.page_canvas.create_window(
+            (0, 0), window=self.content, anchor="nw"
+        )
+        self.content.bind("<Configure>", self._update_page_scrollregion)
+        self.page_canvas.bind("<Configure>", self._resize_page_content)
+        self.page_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.page_canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.page_canvas.bind_all("<Button-5>", self._on_mousewheel)
 
     def _nav_button(self, page: str, label: str) -> None:
         p = self.palette
@@ -220,7 +254,7 @@ class MousehareApp:
 
     def _draw_status_bar(self) -> None:
         p = self.palette
-        self.status_bar = tk.Frame(self.content, bg=p["panel"],
+        self.status_bar = tk.Frame(self.content_area, bg=p["panel"],
                                    highlightbackground=p["line"], highlightthickness=1)
         self.status_bar.pack(side="bottom", fill="x", pady=(14, 0))
         self.status_dot = tk.Canvas(self.status_bar, width=16, height=16, bg=p["panel"],
@@ -234,6 +268,26 @@ class MousehareApp:
         self.status_label.pack(side="left", pady=11)
         tk.Label(self.status_bar, text="TCP / JSON FRAMED", bg=p["panel"], fg=p["muted"],
                  font=("Courier New", 8)).pack(side="right", padx=14)
+
+    def _update_page_scrollregion(self, _event=None) -> None:
+        self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
+
+    def _resize_page_content(self, event) -> None:
+        self.page_canvas.itemconfigure(self.page_window, width=event.width)
+
+    def _on_mousewheel(self, event):
+        if getattr(event, "num", None) == 4:
+            direction, steps = -1, 1
+        elif getattr(event, "num", None) == 5:
+            direction, steps = 1, 1
+        else:
+            delta = int(getattr(event, "delta", 0))
+            if not delta:
+                return "break"
+            direction = -1 if delta > 0 else 1
+            steps = max(1, abs(delta) // 120)
+        self.page_canvas.yview_scroll(direction * steps * 3, "units")
+        return "break"
 
     def _show_page(self, page: str) -> None:
         self.current_page = page
@@ -287,10 +341,15 @@ class MousehareApp:
                          highlightcolor=p["accent"], font=("Courier New", 11))
         return entry
 
+    def _readonly_entry(self, parent, variable, width=24):
+        return ttk.Entry(parent, textvariable=variable, width=width,
+                         state="readonly", style="Mousehare.Readonly.TEntry",
+                         font=("Courier New", 11))
+
     def _render_connect(self) -> None:
         p = self.palette
         role = "Mac → Windows" if ROLE == "client" else "Windows receiver"
-        self._title("Device Link", f"{role} · Secure pairing on your local network")
+        self._title("Device Link", f"{role} · Pairing key on your local network")
 
         visual = self._panel(self.content, fill="x", pady=(0, 13))
         self._draw_link_visual(visual)
@@ -328,7 +387,7 @@ class MousehareApp:
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
             self._entry(fields, self.ip_var).grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
             self._entry(fields, self.port_var, width=8).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self.token_entry = self._entry(fields, self.token_var, show="•")
+            self.token_entry = self._entry(fields, self.token_var, show="*")
             self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
         else:
             self.ip_var.set(self.local_ip)
@@ -338,16 +397,20 @@ class MousehareApp:
                      font=("Arial", 9)).grid(row=0, column=1, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Pairing Key", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
-            self._entry(fields, self.ip_var, state="readonly").grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
+            self._readonly_entry(fields, self.ip_var).grid(
+                row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8
+            )
             self._entry(fields, self.port_var, width=8).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self.token_entry = self._entry(fields, self.token_var, show="•")
+            self.token_entry = self._entry(fields, self.token_var, show="*")
             self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
             self.token_var.set(self.settings["server_token"])
-        tk.Checkbutton(fields, text="Show pairing key", variable=self.show_token,
-                       command=self._refresh_token_visibility, bg=p["panel"], fg=p["muted"],
-                       selectcolor=p["field"], activebackground=p["panel"],
-                       activeforeground=p["text"], font=("Arial", 8)).grid(
-                           row=2, column=2, sticky="e", pady=(5, 0))
+        self.show_token_button = tk.Button(
+            fields, text="Show", command=self._toggle_token_visibility,
+            relief="flat", bd=0, bg=p["panel2"], fg=p["text"],
+            activebackground=p["accent_hi"], activeforeground="#18130F",
+            padx=10, pady=4, cursor="hand2", font=("Arial", 8, "bold"),
+        )
+        self.show_token_button.grid(row=2, column=2, sticky="e", pady=(5, 0))
 
         controls = tk.Frame(details_inner, bg=p["panel"])
         controls.pack(fill="x")
@@ -579,7 +642,14 @@ class MousehareApp:
     def _refresh_token_visibility(self) -> None:
         token_entry = getattr(self, "token_entry", None)
         if token_entry is not None:
-            token_entry.configure(show="" if self.show_token.get() else "•")
+            token_entry.configure(show="" if self.show_token.get() else "*")
+        show_button = getattr(self, "show_token_button", None)
+        if show_button is not None:
+            show_button.configure(text="Hide" if self.show_token.get() else "Show")
+
+    def _toggle_token_visibility(self) -> None:
+        self.show_token.set(not self.show_token.get())
+        self._refresh_token_visibility()
 
     def _validate_and_config(self) -> dict | None:
         try:

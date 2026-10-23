@@ -91,13 +91,22 @@ def _new_channel(shared_secret: bytes, client_nonce: bytes, server_nonce: bytes,
 
 
 def client_handshake(sock, token: str, mac_position: str, clipboard_sync: bool,
-                     send_message, recv_message) -> tuple["SecureChannel", bool]:
-    """Authenticate the server and establish an encrypted client channel."""
+                     send_message, recv_message, *, allow_legacy_protocol: bool = False):
+    """Authenticate the server and establish a channel.
+
+    Legacy compatibility is opt-in. When enabled, the hello includes a plain
+    ``token`` field for older v1 servers and a v1 reply returns a
+    ``LegacyChannel`` instead of an encrypted ``SecureChannel``.
+
+    Returns ``(channel, clipboard_enabled)``.
+    """
     secret = _token_bytes(token)
     if mac_position not in ALLOWED_MAC_POSITIONS:
         raise HandshakeError("Choose a valid Mac position.")
     if type(clipboard_sync) is not bool:
         raise HandshakeError("Invalid clipboard sharing preference.")
+    if type(allow_legacy_protocol) is not bool:
+        raise HandshakeError("Invalid legacy protocol preference.")
 
     client_nonce = os.urandom(32)
     client_private = X25519PrivateKey.generate()
@@ -113,16 +122,31 @@ def client_handshake(sock, token: str, mac_position: str, clipboard_sync: bool,
         "clipboard_sync": clipboard_sync,
         "proof": _b64(_proof(secret, b"client", initial)),
     }
+    if allow_legacy_protocol:
+        # A v1 server can authenticate only by receiving the pairing key in
+        # clear text. Never send it to an encrypted v3 peer by default.
+        hello["token"] = token
     if not send_message(sock, hello):
         raise HandshakeError("Could not send the pairing request.")
     reply = recv_message(sock)
     if not isinstance(reply, dict) or reply.get("type") != "hello_ok":
-        if isinstance(reply, dict) and reply.get("type") == "hello_error" \
-                and reply.get("version") != PROTOCOL_VERSION:
-            raise HandshakeError(
-                "The Windows server uses an older protocol. Update Mousehare on both computers."
-            )
         raise HandshakeError("Pairing key rejected or server protocol is incompatible.")
+
+    # ── Legacy v1 server (no version field in reply) ──────────────────────
+    if "version" not in reply:
+        if not allow_legacy_protocol:
+            raise HandshakeError(
+                "The Windows server uses the legacy unencrypted protocol. "
+                "Update Windows, or enable legacy connections in Settings → Security."
+            )
+        if mac_position != "left":
+            raise HandshakeError(
+                "A legacy Windows server only supports the Mac positioned left of Windows. "
+                "Update Windows to use right, top, or bottom."
+            )
+        return LegacyChannel(), False
+
+    # ── Modern v3 server ──────────────────────────────────────────────────
     if reply.get("version") != PROTOCOL_VERSION:
         raise HandshakeError("The Windows server uses an incompatible protocol version.")
     clipboard_enabled = reply.get("clipboard_sync")
@@ -216,8 +240,35 @@ def _send_handshake_error(sock, send_message) -> None:
         pass
 
 
+class LegacyChannel:
+    """Plain-text JSON message stream for backward-compatible v1 servers.
+
+    Provides the same ``send`` / ``receive`` interface as ``SecureChannel``
+    so the rest of the application does not need to branch on channel type.
+    """
+
+    is_encrypted = False
+
+    def __init__(self):
+        self._send_lock = threading.Lock()
+
+    def send(self, sock, message: dict, send_message) -> bool:
+        if not isinstance(message, dict):
+            return False
+        with self._send_lock:
+            return send_message(sock, message)
+
+    def receive(self, sock, recv_message) -> dict | None:
+        msg = recv_message(sock)
+        if not isinstance(msg, dict):
+            return None
+        return msg
+
+
 class SecureChannel:
     """AES-GCM protected JSON message stream with strict sequence validation."""
+
+    is_encrypted = True
 
     def __init__(self, *, send_key: bytes, receive_key: bytes):
         self._send_cipher = AESGCM(send_key)

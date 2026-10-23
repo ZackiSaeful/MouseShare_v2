@@ -94,6 +94,7 @@ def default_settings() -> dict:
         "theme": "TVA",
         "local_discovery": False,
         "clipboard_sync": False,
+        "allow_legacy_protocol": False,
         "debug": False,
     }
 
@@ -743,6 +744,28 @@ class MousehareApp:
             self._button(wrap, "Save clipboard preference",
                          self._save_clipboard_preference,
                          primary=True, anchor="w", pady=(0, 16))
+            if ROLE == "client":
+                self.legacy_protocol_var = tk.BooleanVar(
+                    value=bool(self.settings.get("allow_legacy_protocol", False)))
+                tk.Checkbutton(
+                    wrap, text="Allow a legacy Windows server without encryption",
+                    variable=self.legacy_protocol_var, bg=p["panel"], fg=p["text"],
+                    selectcolor=p["field"], activebackground=p["panel"],
+                    activeforeground=p["text"], disabledforeground=p["disabled"],
+                    font=("Arial", 10), state="disabled" if self.backend_active else "normal",
+                ).pack(anchor="w", pady=(0, 5))
+                tk.Label(
+                    wrap,
+                    text="Off by default. Enable only to connect to an older Windows Mousehare build. "
+                         "Its pairing key and mouse or keyboard events can be read on the local network; "
+                         "clipboard sharing stays off, and it supports only Mac left of Windows. "
+                         "Disconnect before changing this setting.",
+                    bg=p["panel"], fg=p["red"], font=("Arial", 9),
+                    wraplength=520, justify="left",
+                ).pack(anchor="w", pady=(0, 8))
+                self._button(wrap, "Save legacy connection preference",
+                             self._save_legacy_protocol_preference,
+                             anchor="w", pady=(0, 16))
             if ROLE == "server":
                 self.settings_token_var = tk.StringVar(value=self.settings["server_token"])
                 self.settings_key_entry = self._entry(
@@ -872,6 +895,27 @@ class MousehareApp:
         message = ("Plain-text clipboard sharing is enabled locally; the peer must also enable it."
                    if enabled else "Plain-text clipboard sharing is disabled.")
         self._set_status("disconnected", message)
+
+    def _save_legacy_protocol_preference(self) -> None:
+        if ROLE != "client":
+            return
+        if self.backend_active:
+            messagebox.showwarning(
+                "Disconnect first",
+                "Disconnect Mousehare before changing legacy connection support.",
+                parent=self.root,
+            )
+            return
+        previous = bool(self.settings.get("allow_legacy_protocol", False))
+        self.settings["allow_legacy_protocol"] = bool(self.legacy_protocol_var.get())
+        if not self._save_settings():
+            self.settings["allow_legacy_protocol"] = previous
+            self.legacy_protocol_var.set(previous)
+            return
+        if self.settings["allow_legacy_protocol"]:
+            self._set_status("disconnected", "Legacy connection support is enabled. The next legacy session will be unencrypted.")
+        else:
+            self._set_status("disconnected", "Legacy connection support is disabled. Mousehare requires encrypted pairing.")
 
     def _save_theme(self) -> None:
         self.settings["theme"] = self.theme_var.get()
@@ -1008,6 +1052,7 @@ class MousehareApp:
                     "edge_threshold": int(self.settings.get("edge_threshold", 3)),
                     "mac_position": self.settings.get("mac_position", "left"),
                     "clipboard_sync": bool(self.settings.get("clipboard_sync", False)),
+                    "allow_legacy_protocol": bool(self.settings.get("allow_legacy_protocol", False)),
                     "debug": False}
         self.settings["server_port"] = port
         self.settings["server_token"] = token

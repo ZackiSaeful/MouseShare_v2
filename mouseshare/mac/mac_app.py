@@ -91,12 +91,12 @@ except ImportError as _e:
 
 try:
     from .protocol import recv_message, send_message
-    from ..secure_transport import HandshakeError, client_handshake, opposite_edge
+    from ..secure_transport import HandshakeError, LegacyChannel, client_handshake, opposite_edge
     from ..input_coalescer import OrderedInputQueue
     from ..clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
 except ImportError:  # Direct legacy execution: python mac_app.py
     from protocol import recv_message, send_message
-    from mouseshare.secure_transport import HandshakeError, client_handshake, opposite_edge
+    from mouseshare.secure_transport import HandshakeError, LegacyChannel, client_handshake, opposite_edge
     from mouseshare.input_coalescer import OrderedInputQueue
     from mouseshare.clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
 
@@ -179,11 +179,14 @@ class AppState:
             self._channel = channel
         log.info("[STATE] CONNECTED + MAC_ACTIVE")
         _update_tray()
-        message = "Connected to the Windows host."
-        if clipboard_enabled:
-            message += " Plain-text clipboard sync is active."
+        encrypted = getattr(channel, "is_encrypted", True)
+        if not encrypted:
+            message = ("Connected to the Windows host (legacy protocol, no encryption). "
+                       "Update the Windows app for encrypted sessions and clipboard sharing.")
+        elif clipboard_enabled:
+            message = "Connected to the Windows host. Plain-text clipboard sync is active."
         else:
-            message += " Clipboard text sharing is off; both devices must enable it."
+            message = "Connected to the Windows host. Clipboard text sharing is off; both devices must enable it."
         _notify_status("connected", message)
 
     def set_disconnected(self) -> None:
@@ -953,7 +956,9 @@ def _connect_loop(generation: int | None = None) -> None:
             # Pairing-key authentication and ephemeral encrypted session setup.
             clipboard_preference = CONFIG.get("clipboard_sync", False)
             channel, clipboard_enabled = client_handshake(
-                s, token, mac_position, clipboard_preference, send_message, recv_message)
+                s, token, mac_position, clipboard_preference, send_message, recv_message,
+                allow_legacy_protocol=bool(CONFIG.get("allow_legacy_protocol", False)),
+            )
 
             if not still_current():
                 s.close()

@@ -1,0 +1,14 @@
+.build/
+build/
+dist/
+release/
+__pycache__/
+*.py[cod]
+.venv/
+*.spec.bak
+Mousehare.spec
+*.dmg
+*.exe
+*.ico
+*.icns
+mouseshare.iconset/

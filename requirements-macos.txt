@@ -1,0 +1,13 @@
+# Build with Python 3.13 on the Mac architecture being released.
+PyInstaller==6.22.3
+altgraph==0.17.5
+macholib==1.16.4
+packaging==26.3
+pyinstaller-hooks-contrib==2026.9
+setuptools==84.2.1
+pyobjc-core==12.2.2
+pyobjc-framework-Cocoa==12.2.2
+pyobjc-framework-Quartz==12.2.2
+pystray==0.19.5
+Pillow==13.0.0
+six==1.17.0

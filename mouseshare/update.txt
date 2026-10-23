@@ -1,0 +1,8 @@
+sudah bagus, semuanya berfungsi, cuman bisa nggak ketika pindah di windows, mouse di mac itu hilang?
+karena yang terjadi disini ketika masuk kel ayar windows di mac itu ikut gerak, sehinggak ketika kembali mouse di mac udah ada dikanan. saya inginnya sinkron agar mouse dari kanan windows masuk ke mac, di mac juga masuk lewat kiri.
+
+aku mau tanya, kenapam otior dan privac input itu di mac bukan di windows?
+
+1. bikin pengaturan short cut
+2. bisa diperhalus lagi nggak?
+

@@ -41,11 +41,11 @@ except ImportError as _e:
 
 try:
     from .protocol import recv_message, send_message
-    from ..secure_transport import HandshakeError, server_handshake
+    from ..secure_transport import HandshakeError, PROTOCOL_VERSION, server_handshake
     from ..clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
 except ImportError:  # Direct legacy execution: python windows_app.py
     from protocol import recv_message, send_message
-    from mouseshare.secure_transport import HandshakeError, server_handshake
+    from mouseshare.secure_transport import HandshakeError, PROTOCOL_VERSION, server_handshake
     from mouseshare.clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
 
 
@@ -607,7 +607,10 @@ def _run_server() -> None:
     srv.settimeout(1.0)   # allows checking _server_stop periodically
     _server_socket = srv
     log.info("[NETWORK] Listening on %s:%d", host, port)
-    _notify_status("disconnected", f"Listening on {host}:{port}. Waiting for a client.")
+    _notify_status(
+        "disconnected",
+        f"Listening on {host}:{port}. Secure protocol v{PROTOCOL_VERSION}; waiting for a client.",
+    )
 
     while not _server_stop.is_set():
         try:

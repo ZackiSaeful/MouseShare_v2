@@ -5,7 +5,8 @@ For end-user installation, use the Windows installer described in the project [R
 ## Overview
 Windows Agent is the TCP server.  It receives keyboard and mouse events from
 the Mac agent and injects them into Windows using pynput.
-It also monitors the cursor: when it reaches the left edge, it signals Mac.
+It also monitors the edge facing the Mac and returns the pointer to the matching
+Mac edge. The Mac's configured placement is exchanged during secure pairing.
 
 ## Requirements
 - Windows 10 / 11
@@ -27,15 +28,23 @@ py -m venv .venv
 
 ```json
 {
-    "host": "0.0.0.0",      // listen on all interfaces
+    "host": "192.168.0.102", // bind only to the Windows LAN address
     "port": 5555,
-    "token": "CHANGE_ME",   // must match mac/config.json
-    "edge_threshold": 3,    // pixels from left edge to trigger switch back
+    "token": "<random generated pairing key>",
+    "edge_threshold": 3,    // pixels from the edge facing Mac
     "debug": true
 }
 ```
 
-Change `token` to match the same value in the Mac config.
+Use the random pairing key generated in the Windows Mousehare app and copy it to
+the Mac. The current app accepts any non-empty key while retaining protocol-v3
+compatibility. New app-generated 22-character keys contain 128 bits of
+randomness; use them instead of a short self-chosen phrase, which may be guessed
+from a recorded pairing exchange. Existing longer keys remain valid.
+
+Plain-text clipboard sharing is optional and off by default. Enable it under
+Settings → Security on both computers and reconnect both sides. Only text up to
+48 KiB is shared over the encrypted pairing; images and files are not shared.
 
 ## Running
 
@@ -58,7 +67,7 @@ Windows Firewall may block port 5555.
 Allow it with (run as Administrator):
 
 ```cmd
-netsh advfirewall firewall add rule name="MouseShare" dir=in action=allow protocol=TCP localport=5555
+netsh advfirewall firewall add rule name="MouseShare" dir=in action=allow protocol=TCP localport=5555 profile=private
 ```
 
 Or: Windows Security → Firewall → Allow an app → Add python.exe.

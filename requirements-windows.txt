@@ -8,4 +8,7 @@ setuptools==84.2.1
 pynput==1.7.7
 pystray==0.19.5
 Pillow==13.0.0
+cffi==2.1.1
+cryptography==50.0.2
+pycparser==3.12
 six==1.17.0

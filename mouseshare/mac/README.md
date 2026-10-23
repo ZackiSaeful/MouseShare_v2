@@ -3,9 +3,12 @@
 For end-user installation, use the macOS DMG described in the project [README](../../README.md). The terminal workflow below is retained for contributors who need to debug the original agent directly.
 
 ## Overview
-Mac Agent captures keyboard and mouse via macOS CGEventTap.
-When cursor hits the right screen edge, all input is forwarded to Windows.
-When Windows signals "edge left", Mac resumes normal operation.
+Mac Agent captures keyboard and mouse via macOS CGEventTap. Its edge is selected
+by the saved Mac position relative to Windows. Pairing uses an authenticated
+ephemeral key exchange, then encrypts and sequence-checks control messages.
+Clipboard sharing is optional, plain-text only, and off by default. If enabled
+on both computers, Mousehare reads and writes the macOS general pasteboard while
+the secure connection is active. macOS may show its clipboard privacy prompt.
 
 ## Requirements
 - macOS 12+ (Monterey or later recommended)
@@ -28,14 +31,19 @@ python -m pip install -r requirements.txt
 {
     "windows_host": "192.168.0.101",   // IP of your Windows PC
     "port": 5555,
-    "token": "CHANGE_ME",              // must match windows/config.json
-    "edge_threshold": 3,               // pixels from right edge to trigger switch
+    "token": "<server-generated pairing key>",
+    "mac_position": "left",           // left, right, top, or bottom of Windows
+    "edge_threshold": 3,               // pixels from the selected edge
     "debug": true
 }
 ```
 
 Change `windows_host` to your actual Windows PC's local IP.
-Change `token` to a shared secret string — pick anything unique.
+Copy the random pairing key from the Windows Mousehare app. The current app
+accepts any non-empty key and remains compatible with established protocol-v3
+Windows servers. Newly generated 22-character keys contain 128 bits of
+randomness; use them instead of a short self-chosen phrase, which may be guessed
+from a recorded pairing exchange. A short key requires the current Windows build.
 
 ## Running
 
@@ -86,9 +94,9 @@ This always means a missing permission.
 DISCONNECTED
      ↓  (TCP connect + handshake OK)
 CONNECTED + MAC_ACTIVE
-     ↓  (cursor reaches right edge)
+     ↓  (cursor reaches the edge facing Windows)
 CONNECTED + WINDOWS_ACTIVE
-     ↓  (Windows detects cursor at left edge, sends edge=left)
+     ↓  (Windows detects the edge facing Mac and sends its side)
 CONNECTED + MAC_ACTIVE
      ...
 ```
@@ -104,4 +112,4 @@ On any disconnect: immediately resets to MAC_ACTIVE, restores cursor.
 | Cursor stuck invisible after crash | Run: `python -c "import Quartz; Quartz.CGAssociateMouseAndMouseCursorPosition(True); Quartz.CGDisplayShowCursor(Quartz.CGMainDisplayID())"` |
 | Cannot connect to Windows | Check `windows_host` IP, Windows firewall, and that windows_app.py is running |
 | Typing appears in both Mac and Windows | Event tap not active — check permissions |
-| Token error in logs | Ensure both config.json files have the same `token` value |
+| Pairing key rejected | Copy the current key from the Windows app; regenerate it there if it may have been exposed |

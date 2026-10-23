@@ -10,4 +10,7 @@ pyobjc-framework-Cocoa==12.2.2
 pyobjc-framework-Quartz==12.2.2
 pystray==0.19.5
 Pillow==13.0.0
+cffi==2.1.1
+cryptography==50.0.2
+pycparser==3.12
 six==1.17.0

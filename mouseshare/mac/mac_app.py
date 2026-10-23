@@ -5,8 +5,8 @@ MouseShare -- Mac Agent
 * Captures Mac keyboard + mouse via CGEventTap (kCGEventTapOptionDefault).
 * MAC_ACTIVE  : input passes through to Mac apps normally.
 * WINDOWS_ACTIVE: every event is forwarded to Windows and suppressed on Mac.
-* Right-edge detection triggers MAC -> WINDOWS transition.
-* Incoming edge=left from Windows triggers WINDOWS -> MAC transition.
+* The selected peer-facing edge triggers MAC -> WINDOWS transition.
+* An authenticated Windows edge event returns control to the matching Mac edge.
 * On disconnect: always restores mouse association and cursor visibility.
 """
 from __future__ import annotations
@@ -35,6 +35,10 @@ try:
         CGEventMaskBit,
         CGEventTapCreate,
         CGEventTapEnable,
+        CGPreflightListenEventAccess,
+        CGPreflightPostEventAccess,
+        CGRequestListenEventAccess,
+        CGRequestPostEventAccess,
         CGMainDisplayID,
         CGWarpMouseCursorPosition,
         kCGEventFlagMaskAlphaShift,
@@ -87,8 +91,14 @@ except ImportError as _e:
 
 try:
     from .protocol import recv_message, send_message
+    from ..secure_transport import HandshakeError, client_handshake, opposite_edge
+    from ..input_coalescer import OrderedInputQueue
+    from ..clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
 except ImportError:  # Direct legacy execution: python mac_app.py
     from protocol import recv_message, send_message
+    from mouseshare.secure_transport import HandshakeError, client_handshake, opposite_edge
+    from mouseshare.input_coalescer import OrderedInputQueue
+    from mouseshare.clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
 
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -99,6 +109,19 @@ def _setup_logging(debug: bool) -> None:
         format="%(asctime)s %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+def _running_app_path() -> str:
+    """Return the exact app bundle whose TCC permissions macOS is checking."""
+    try:
+        executable = Path(sys.executable).resolve()
+        if getattr(sys, "frozen", False):
+            for parent in executable.parents:
+                if parent.suffix == ".app":
+                    return str(parent)
+        return str(executable)
+    except OSError:
+        return sys.executable
 
 
 log = logging.getLogger(__name__)
@@ -126,6 +149,7 @@ class AppState:
         self.conn        = ConnState.DISCONNECTED
         self.dev         = DevState.MAC_ACTIVE
         self._sock       = None          # active TCP socket
+        self._channel    = None          # authenticated encrypted stream
         self._cursor_hid = False         # True while cursor is hidden
         self._dissoc     = False         # True while mouse is dissociated
 
@@ -141,21 +165,33 @@ class AppState:
         with self._lock:
             return self._sock
 
+    @property
+    def channel(self):
+        with self._lock:
+            return self._channel
+
     # ── Transitions ───────────────────────────────────────────────────────────
-    def set_connected(self, s) -> None:
+    def set_connected(self, s, channel, clipboard_enabled: bool = False) -> None:
         with self._lock:
             self.conn  = ConnState.CONNECTED
             self.dev   = DevState.MAC_ACTIVE
             self._sock = s
+            self._channel = channel
         log.info("[STATE] CONNECTED + MAC_ACTIVE")
         _update_tray()
-        _notify_status("connected", "Connected to the Windows host.")
+        message = "Connected to the Windows host."
+        if clipboard_enabled:
+            message += " Plain-text clipboard sync is active."
+        else:
+            message += " Clipboard text sharing is off; both devices must enable it."
+        _notify_status("connected", message)
 
     def set_disconnected(self) -> None:
         with self._lock:
             self.conn  = ConnState.DISCONNECTED
             self.dev   = DevState.MAC_ACTIVE
             self._sock = None
+            self._channel = None
         log.info("[STATE] DISCONNECTED")
         _update_tray()
         _notify_status("disconnected", "Disconnected.")
@@ -175,6 +211,7 @@ class AppState:
     def close_socket(self) -> None:
         with self._lock:
             s, self._sock = self._sock, None
+            self._channel = None
         if s:
             try:
                 s.close()
@@ -185,6 +222,9 @@ class AppState:
 STATE  = AppState()
 CONFIG: dict = {}
 _status_callback = None
+_clipboard_sync_lock = threading.Lock()
+_clipboard_sync: ClipboardSynchronizer | None = None
+_input_queue: OrderedInputQueue | None = None
 
 
 def _notify_status(status: str, message: str = "") -> None:
@@ -276,11 +316,10 @@ FLAG_TO_MOD: dict[int, str] = {
 _mod_lock      = threading.Lock()
 _prev_flags    = 0     # last known CGEventFlags bitmask
 
-# Y-coordinate (screen pixels) when cursor last hit the right edge of Mac screen.
-# Used to place cursor at the matching Y on the left edge when returning from Windows.
-_last_edge_y: int = 500
+# Coordinate along the selected screen edge, reused on the return handoff.
+_last_edge_coord: int = 500
 
-# Set to True the instant right-edge is detected, BEFORE the transition thread runs.
+# Set to True as soon as the selected edge is detected, before transition work.
 # This ensures the event tap immediately starts suppressing mouse events without
 # waiting for the async thread to call _dissociate_mouse() / _hide_cursor().
 _switching_to_win: bool = False
@@ -366,15 +405,94 @@ def _update_tray() -> None:
 #  Network helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_send_lock = threading.Lock()
-
-
 def _net_send(msg: dict) -> bool:
-    s = STATE.sock
+    with STATE._lock:
+        s, channel = STATE._sock, STATE._channel
+    if s is None or channel is None:
+        return False
+    return channel.send(s, msg, send_message)
+
+
+def _deliver_queued_input(channel, msg: dict) -> bool:
+    """Send one ordered input message only on its original secure session."""
+    with STATE._lock:
+        if STATE._channel is not channel:
+            return False
+        s = STATE._sock
     if s is None:
         return False
-    with _send_lock:
-        return send_message(s, msg)
+    return channel.send(s, msg, send_message)
+
+
+def _queued_input_delivery_failed(channel) -> None:
+    """Restore local control if an asynchronous input send loses its session."""
+    with STATE._lock:
+        if STATE._channel is not channel:
+            return
+        s = STATE._sock
+    _on_conn_lost(s)
+
+
+def _queue_remote_input(msg: dict) -> bool:
+    """Queue input without blocking the CoreGraphics event-tap callback."""
+    with STATE._lock:
+        channel = STATE._channel
+    queue = _input_queue
+    if channel is None or queue is None:
+        return False
+    return queue.enqueue(channel, msg)
+
+
+def _start_input_queue() -> None:
+    global _input_queue
+    if _input_queue is None:
+        _input_queue = OrderedInputQueue(
+            _deliver_queued_input,
+            _queued_input_delivery_failed,
+        )
+    _input_queue.start()
+
+
+def _stop_input_queue() -> None:
+    global _input_queue
+    if _input_queue is not None:
+        _input_queue.stop()
+        _input_queue = None
+
+
+def _send_clipboard_text(text: str) -> bool:
+    return _net_send({"type": "clipboard", "text": text})
+
+
+def _start_clipboard_sync() -> None:
+    global _clipboard_sync
+    synchronizer = ClipboardSynchronizer(_send_clipboard_text)
+    with _clipboard_sync_lock:
+        previous, _clipboard_sync = _clipboard_sync, synchronizer
+    if previous is not None:
+        previous.stop()
+    synchronizer.start()
+    log.info("[CLIPBOARD] Plain-text sync started (48 KiB maximum)")
+
+
+def _stop_clipboard_sync() -> None:
+    global _clipboard_sync
+    with _clipboard_sync_lock:
+        synchronizer, _clipboard_sync = _clipboard_sync, None
+    if synchronizer is not None:
+        synchronizer.stop()
+        log.info("[CLIPBOARD] Sync stopped")
+
+
+def _apply_remote_clipboard(msg: dict) -> None:
+    text = msg.get("text")
+    if not valid_clipboard_text(text):
+        log.warning("[CLIPBOARD] Ignoring invalid or oversized clipboard message")
+        return
+    with _clipboard_sync_lock:
+        synchronizer = _clipboard_sync
+    if synchronizer is not None:
+        synchronizer.apply_remote(text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -385,8 +503,7 @@ _transition_lock = threading.Lock()
 
 
 def switch_to_windows() -> None:
-    """Atomic transition: MAC_ACTIVE -> WINDOWS_ACTIVE.
-    Triggered when cursor reaches the right screen edge."""
+    """Atomic transition from the selected Mac edge to Windows."""
     with _transition_lock:
         with STATE._lock:
             if STATE.dev  != DevState.MAC_ACTIVE:
@@ -394,21 +511,39 @@ def switch_to_windows() -> None:
             if STATE.conn != ConnState.CONNECTED:
                 return
 
-        log.info("[EDGE] Mac right edge -- switching to Windows")
+        mac_exit_edge = opposite_edge(CONFIG.get("mac_position", "left"))
+        log.info("[EDGE] Mac %s edge -- switching to Windows", mac_exit_edge)
 
-        # Step 1: update state
+        # Step 1: queue activation before accepting movement input.  The same
+        # ordered worker forwards later deltas, so Windows always activates
+        # before it receives its first mouse movement.
+        sw = int(CGDisplayPixelsWide(CGMainDisplayID()))
+        sh = int(CGDisplayPixelsHigh(CGMainDisplayID()))
+        extent = sh if mac_exit_edge in ("left", "right") else sw
+        fraction = _last_edge_coord / max(1, extent - 1)
+        if not _queue_remote_input({
+            "type": "activate_windows",
+            "position": max(0.0, min(1.0, fraction)),
+        }):
+            _on_conn_lost()
+            return
         STATE.set_windows_active()
         # Step 2: reset the early-suppression flag (state is now authoritative)
         global _switching_to_win
         _switching_to_win = False
-        # Step 3: notify Windows to start accepting input
-        _net_send({"type": "activate_windows"})
-        # Step 4: park cursor at the right edge so it doesn't drift visually
-        #         before _dissociate_mouse() takes effect
+        # Step 3: park the cursor on the selected edge before entering
+        # delta-only mode.
         sw = int(CGDisplayPixelsWide(CGMainDisplayID()))
         sh = int(CGDisplayPixelsHigh(CGMainDisplayID()))
-        safe_y = max(0, min(_last_edge_y, sh - 1))
-        CGWarpMouseCursorPosition((sw - 1, safe_y))
+        if mac_exit_edge in ("left", "right"):
+            safe = max(0, min(_last_edge_coord, sh - 1))
+            x = 5 if mac_exit_edge == "left" else sw - 6
+            point = (x, safe)
+        else:
+            safe = max(0, min(_last_edge_coord, sw - 1))
+            y = 5 if mac_exit_edge == "top" else sh - 6
+            point = (safe, y)
+        CGWarpMouseCursorPosition(point)
         # Step 5: detach physical mouse from cursor (delta-only mode)
         _dissociate_mouse()
         # Step 6: hide cursor so it does not linger visibly on screen
@@ -416,28 +551,42 @@ def switch_to_windows() -> None:
         # Forwarding is now handled automatically by the event tap callback
 
 
-def switch_to_mac() -> None:
+def switch_to_mac(windows_edge: str, position: float | None = None) -> None:
     """Atomic transition: WINDOWS_ACTIVE -> MAC_ACTIVE.
-    Triggered when Mac receives edge=left from Windows."""
+    Triggered when Windows reports its selected edge."""
     with _transition_lock:
         with STATE._lock:
             if STATE.dev != DevState.WINDOWS_ACTIVE:
                 return
 
-        log.info("[EDGE] Windows left edge -- switching to Mac")
+        mac_entry_edge = opposite_edge(windows_edge)
+        log.info("[EDGE] Windows %s edge -- switching to Mac %s edge",
+                 windows_edge, mac_entry_edge)
 
         # Step 1: update state (stops forwarding in event tap callback)
         STATE.set_mac_active()
-        # Step 2: tell Windows to stop accepting input
-        _net_send({"type": "deactivate_windows"})
-        # Step 3: warp cursor to the left edge of Mac screen BEFORE showing it.
-        #         This makes the cursor "enter" Mac from the left, mirroring how
-        #         it exits Windows from the left edge -- natural dual-monitor feel.
+        # Step 2: tell Windows to stop after every previously queued input
+        # event has been delivered.
+        if not _queue_remote_input({"type": "deactivate_windows"}):
+            _on_conn_lost()
+        # Warp to the Mac edge facing Windows, preserving the cross-edge position.
         sw = int(CGDisplayPixelsWide(CGMainDisplayID()))
         sh = int(CGDisplayPixelsHigh(CGMainDisplayID()))
-        safe_y = max(0, min(_last_edge_y, sh - 1))
-        CGWarpMouseCursorPosition((5, safe_y))   # 5 px from left edge
-        log.debug("[CURSOR] Warped to left edge x=5 y=%d", safe_y)
+        global _last_edge_coord
+        if isinstance(position, (int, float)) and not isinstance(position, bool) \
+                and 0.0 <= position <= 1.0:
+            extent = sh if mac_entry_edge in ("left", "right") else sw
+            _last_edge_coord = round(position * max(0, extent - 1))
+        if mac_entry_edge in ("left", "right"):
+            safe = max(0, min(_last_edge_coord, sh - 1))
+            x = 5 if mac_entry_edge == "left" else sw - 6
+            point = (x, safe)
+        else:
+            safe = max(0, min(_last_edge_coord, sw - 1))
+            y = 5 if mac_entry_edge == "top" else sh - 6
+            point = (safe, y)
+        CGWarpMouseCursorPosition(point)
+        log.debug("[CURSOR] Warped to Mac %s edge at %s", mac_entry_edge, point)
         # Step 4: re-attach physical mouse to cursor
         _associate_mouse()
         # Step 5: make cursor visible at its new left-edge position
@@ -451,7 +600,7 @@ def switch_to_mac() -> None:
 def _handle_event(proxy, event_type: int, event, refcon):
     """CGEventTap callback.
     Return *event* to pass through, or *None* to suppress from Mac apps."""
-    global _prev_flags, _last_edge_y, _switching_to_win
+    global _prev_flags, _last_edge_coord, _switching_to_win
 
     win = STATE.is_windows_active   # read once per event (atomic)
 
@@ -463,8 +612,8 @@ def _handle_event(proxy, event_type: int, event, refcon):
 
         if win:
             log.debug("[KEY] %s %s -> Windows", value, action)
-            ok = _net_send({"type": "key", "action": action,
-                            "key": {"kind": kind, "value": value}})
+            ok = _queue_remote_input({"type": "key", "action": action,
+                                      "key": {"kind": kind, "value": value}})
             if not ok:
                 threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None   # suppress: key must NOT reach Mac apps
@@ -483,8 +632,12 @@ def _handle_event(proxy, event_type: int, event, refcon):
                 if was != now:
                     act = "press" if now else "release"
                     log.debug("[KEY] %s %s -> Windows", mod_name, act)
-                    _net_send({"type": "key", "action": act,
-                               "key": {"kind": "special", "value": mod_name}})
+                    if not _queue_remote_input({
+                        "type": "key",
+                        "action": act,
+                        "key": {"kind": "special", "value": mod_name},
+                    }):
+                        threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None   # suppress modifier events from Mac
         return event
 
@@ -504,18 +657,27 @@ def _handle_event(proxy, event_type: int, event, refcon):
                 dy = int(CGEventGetIntegerValueField(event, kCGMouseEventDeltaY))
                 if dx or dy:
                     log.debug("[MOUSE] dx=%d dy=%d -> Windows", dx, dy)
-                    _net_send({"type": "mouse_move", "dx": dx, "dy": dy})
+                    if not _queue_remote_input({"type": "mouse_move", "dx": dx, "dy": dy}):
+                        threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None   # suppress: cursor must not move on Mac
 
-        # MAC_ACTIVE: right-edge detection
+        # MAC_ACTIVE: detect the edge facing the Windows computer.
         pt     = CGEventGetLocation(event)
         sw     = int(CGDisplayPixelsWide(CGMainDisplayID()))
+        sh     = int(CGDisplayPixelsHigh(CGMainDisplayID()))
         thresh = int(CONFIG.get("edge_threshold", 3))
-        if pt.x >= sw - thresh:
-            _last_edge_y    = int(pt.y)
+        mac_exit_edge = opposite_edge(CONFIG.get("mac_position", "left"))
+        at_edge = {
+            "left": pt.x <= thresh,
+            "right": pt.x >= sw - thresh,
+            "top": pt.y <= thresh,
+            "bottom": pt.y >= sh - thresh,
+        }[mac_exit_edge]
+        if at_edge:
+            _last_edge_coord = int(pt.y if mac_exit_edge in ("left", "right") else pt.x)
             _switching_to_win = True   # immediate suppression for next events
-            log.info("[EDGE] cursor_x=%.0f y=%.0f screen_w=%d -- triggering switch",
-                     pt.x, pt.y, sw)
+            log.info("[EDGE] Mac %s edge at x=%.0f y=%.0f -- triggering switch",
+                     mac_exit_edge, pt.x, pt.y)
             # Spawn a new thread so we don't block the event tap run loop
             threading.Thread(target=switch_to_windows, daemon=True).start()
             return None   # suppress this edge-triggering event too
@@ -533,7 +695,10 @@ def _handle_event(proxy, event_type: int, event, refcon):
     if event_type in _BTN_MAP:
         btn, pressed = _BTN_MAP[event_type]
         if win:
-            _net_send({"type": "mouse_click", "button": btn, "pressed": pressed})
+            if not _queue_remote_input({
+                "type": "mouse_click", "button": btn, "pressed": pressed,
+            }):
+                threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None
         return event
 
@@ -542,7 +707,8 @@ def _handle_event(proxy, event_type: int, event, refcon):
         if win:
             dy = int(CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1))
             dx = int(CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis2))
-            _net_send({"type": "mouse_scroll", "dx": dx, "dy": dy})
+            if not _queue_remote_input({"type": "mouse_scroll", "dx": dx, "dy": dy}):
+                threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None
         return event
 
@@ -564,6 +730,24 @@ _backend_generation = 0
 
 def _run_event_tap(generation: int | None = None) -> None:
     global _run_loop_ref, _event_tap_ref
+
+    # Ask macOS to present its native permission prompt when this app copy has
+    # not yet been approved. Preflight again because the user may approve from
+    # that prompt before the tap is created.
+    try:
+        post_access = bool(CGPreflightPostEventAccess())
+        listen_access = bool(CGPreflightListenEventAccess())
+        log.info("[PERMISSION] Accessibility/event posting=%s; Input Monitoring=%s",
+                 post_access, listen_access)
+        if not post_access:
+            CGRequestPostEventAccess()
+        if not listen_access:
+            CGRequestListenEventAccess()
+        post_access = bool(CGPreflightPostEventAccess())
+        listen_access = bool(CGPreflightListenEventAccess())
+    except Exception:
+        log.exception("[PERMISSION] Could not query macOS input permissions")
+        post_access = listen_access = None
 
     event_mask = (
         CGEventMaskBit(kCGEventKeyDown)            |
@@ -596,18 +780,35 @@ def _run_event_tap(generation: int | None = None) -> None:
             return
         log.error("=" * 62)
         log.error("[FATAL] CGEventTapCreate returned None.")
-        log.error("  The application needs TWO macOS permissions:")
-        log.error("  1. System Settings -> Privacy & Security -> Accessibility")
-        log.error("  2. System Settings -> Privacy & Security -> Input Monitoring")
-        log.error("  Add 'Terminal' (or your Python binary) to both lists,")
-        log.error("  then restart this application.")
+        log.error("  Permission check: Accessibility/event posting=%s; Input Monitoring=%s",
+                  post_access, listen_access)
+        app_path = _running_app_path()
         log.error("=" * 62)
         _event_tap_failed.set()
-        _notify_status(
-            "error",
-            "Mousehare needs Accessibility and Input Monitoring permission. "
-            "Enable both in System Settings → Privacy & Security, then restart.",
-        )
+        if post_access is False or listen_access is False:
+            missing = []
+            if post_access is False:
+                missing.append("Accessibility")
+            if listen_access is False:
+                missing.append("Input Monitoring")
+            message = (
+                f"macOS denies { ' and '.join(missing) }. Running copy: {app_path}. "
+                "Enable this exact copy under System Settings → Privacy & Security → "
+                "Accessibility and Input Monitoring, then retry. Ad-hoc builds need "
+                "approval again after each rebuild."
+            )
+        elif post_access is True and listen_access is True:
+            message = (
+                "macOS reports both input permissions enabled, but refused Mousehare's event tap. "
+                f"Running copy: {app_path}. Quit duplicate copies, remove stale Mousehare entries "
+                "from Accessibility and Input Monitoring, add this exact copy, and retry."
+            )
+        else:
+            message = (
+                "macOS refused Mousehare's input event tap and its permission status could not be read. "
+                f"Running copy: {app_path}. Check Accessibility and Input Monitoring for this exact copy."
+            )
+        _notify_status("error", message)
         return
 
     if generation is not None and generation != _backend_generation:
@@ -649,19 +850,26 @@ def _on_conn_lost(expected_sock=None) -> None:
     """Safe-fallback for unexpected TCP disconnect."""
     if expected_sock is not None and STATE.sock is not expected_sock:
         return
+    with STATE._lock:
+        channel = STATE._channel
+    if channel is not None and _input_queue is not None:
+        _input_queue.discard_session(channel)
+    global _switching_to_win
+    _switching_to_win = False
     log.info("[NETWORK] Connection lost")
     log.info("[STATE]   Resetting to MAC_ACTIVE (safe fallback)")
     restore_mac_safe()     # show cursor, re-associate mouse -- always safe
+    _stop_clipboard_sync()
     STATE.close_socket()
     STATE.set_disconnected()
     _notify_status("connecting", "Connection lost. Reconnecting…")
 
 
-def _recv_loop(sock) -> None:
+def _recv_loop(sock, channel) -> None:
     """Daemon thread: reads framed messages from Windows until connection closes."""
     log.info("[NETWORK] Receive loop started")
     while not _quit_event.is_set():
-        msg = recv_message(sock)
+        msg = channel.receive(sock, recv_message)
         if msg is None:
             _on_conn_lost(sock)
             return
@@ -679,15 +887,23 @@ def _handle_incoming(msg: dict) -> None:
 
     if msg_type == "edge":
         edge = msg.get("edge")
-        if edge == "left":
-            log.info("[EDGE] Received edge=left from Windows")
-            if STATE.is_windows_active:
-                switch_to_mac()
+        if edge in ("left", "right", "top", "bottom"):
+            log.info("[EDGE] Received edge=%s from Windows", edge)
+            if STATE.is_windows_active and edge == CONFIG.get("mac_position", "left"):
+                switch_to_mac(edge, msg.get("position"))
             else:
-                log.debug("[EDGE] Ignored (not WINDOWS_ACTIVE)")
+                log.debug("[EDGE] Ignored (unexpected edge or not WINDOWS_ACTIVE)")
+
+    elif msg_type == "clipboard":
+        _apply_remote_clipboard(msg)
 
     elif msg_type == "hello_error":
-        log.error("[NETWORK] Authentication failed -- check token in config.json")
+        log.error("[NETWORK] The Windows server rejected pairing.")
+        _stop_clipboard_sync()
+        with STATE._lock:
+            channel = STATE._channel
+        if channel is not None and _input_queue is not None:
+            _input_queue.discard_session(channel)
         STATE.close_socket()
         STATE.set_disconnected()
 
@@ -707,6 +923,7 @@ def _connect_loop(generation: int | None = None) -> None:
     host  = CONFIG["windows_host"]
     port  = CONFIG["port"]
     token = CONFIG["token"]
+    mac_position = CONFIG.get("mac_position", "left")
 
     if generation is None:
         generation = _backend_generation
@@ -722,8 +939,10 @@ def _connect_loop(generation: int | None = None) -> None:
     while still_current():
         log.info("[NETWORK] Connecting to %s:%d ...", host, port)
         _notify_status("connecting", f"Connecting to {host}:{port}…")
+        s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             s.settimeout(5.0)
             s.connect((host, port))
             if not still_current():
@@ -731,20 +950,10 @@ def _connect_loop(generation: int | None = None) -> None:
                 return
             log.info("[NETWORK] Connected")
 
-            # Handshake
-            if not send_message(s, {"type": "hello", "token": token}):
-                raise OSError("send hello failed")
-            reply = recv_message(s)
-            if not isinstance(reply, dict) or reply.get("type") != "hello_ok":
-                log.error("[NETWORK] Handshake failed: %s", reply)
-                s.close()
-                if still_current():
-                    if isinstance(reply, dict) and reply.get("type") == "hello_error":
-                        _notify_status("error", "Pairing key rejected by the Windows server.")
-                    else:
-                        _notify_status("error", "The server did not complete the pairing handshake.")
-                _quit_event.wait(3.0)
-                continue
+            # Pairing-key authentication and ephemeral encrypted session setup.
+            clipboard_preference = CONFIG.get("clipboard_sync", False)
+            channel, clipboard_enabled = client_handshake(
+                s, token, mac_position, clipboard_preference, send_message, recv_message)
 
             if not still_current():
                 s.close()
@@ -753,17 +962,33 @@ def _connect_loop(generation: int | None = None) -> None:
             s.settimeout(None)   # blocking reads after a bounded handshake
 
             log.info("[NETWORK] Handshake OK")
-            STATE.set_connected(s)
+            STATE.set_connected(s, channel, clipboard_enabled)
+            if clipboard_enabled:
+                _start_clipboard_sync()
 
             # Run the receive loop and wait until it exits (connection lost)
             recv_t = threading.Thread(
-                target=_recv_loop, args=(s,), daemon=True, name="RecvLoop"
+                target=_recv_loop, args=(s, channel), daemon=True, name="RecvLoop"
             )
             recv_t.start()
             recv_t.join()   # blocks until connection is lost
 
+        except HandshakeError as exc:
+            log.error("[NETWORK] Secure pairing failed: %s", exc)
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+            if still_current():
+                _notify_status("error", str(exc))
         except (OSError, ConnectionRefusedError, TimeoutError) as exc:
             log.info("[NETWORK] Cannot connect: %s", exc)
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
             if still_current():
                 _notify_status("error", f"Could not connect to {host}:{port}: {exc}")
 
@@ -781,6 +1006,8 @@ def _do_quit(icon=None, _item=None) -> None:
     _quit_event.set()
     _stop_event_tap()
     restore_mac_safe()   # cursor MUST be shown/associated before exit
+    _stop_clipboard_sync()
+    _stop_input_queue()
     STATE.close_socket()
     if icon is not None:
         icon.stop()
@@ -798,6 +1025,7 @@ def start_backend(config: dict, status_callback=None) -> None:
     _event_tap_ready.clear()
     _event_tap_failed.clear()
     _setup_logging(CONFIG.get("debug", False))
+    _start_input_queue()
     _notify_status("connecting", "Checking macOS input permissions…")
     _event_tap_thread = threading.Thread(
         target=_run_event_tap_guarded, args=(generation,), daemon=True, name="EventTap"
@@ -818,6 +1046,8 @@ def stop_backend() -> None:
     if _event_tap_thread is not None and _event_tap_thread is not threading.current_thread():
         _event_tap_thread.join(timeout=1.0)
     restore_mac_safe()
+    _stop_clipboard_sync()
+    _stop_input_queue()
     STATE.close_socket()
     STATE.set_disconnected()
 

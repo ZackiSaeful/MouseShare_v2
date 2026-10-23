@@ -7,7 +7,7 @@ import json
 import struct
 
 HEADER_SIZE   = 4
-MAX_MSG_BYTES = 10 * 1024 * 1024  # 10 MB sanity cap
+MAX_MSG_BYTES = 128 * 1024  # Control messages are small; cap untrusted frames.
 
 
 def send_message(sock, msg_dict: dict) -> bool:

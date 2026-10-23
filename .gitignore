@@ -12,3 +12,4 @@ Mousehare.spec
 *.ico
 *.icns
 mouseshare.iconset/
+.DS_Store

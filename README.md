@@ -25,10 +25,14 @@ The apps do not require a terminal, Python installation, or administrator access
 ## Pairing and network security
 
 - Both computers should be on a trusted local network. The Windows server binds to the active local IPv4 address and the Mac client connects to that address.
-- The default port is **5555**, matching the existing protocol. Change it in Settings on the server and use the same value on the client.
-- The Windows server generates a random pairing key. Share it only with the intended Mac and use Settings → Security to rotate it.
-- The key is retained in the per-user settings file so the connection can be remembered. On macOS the file is owner-readable only; Windows uses the current user's profile permissions.
-- The protocol authenticates with the pairing key and accepts only the known input and edge messages. It does **not** encrypt network traffic. Use a trusted LAN; do not forward the port to the public internet.
+- The default port is **5555**. Change it in Settings on the server and use the same value on the client.
+- New Windows server keys are random 22-character values with 128 bits of randomness. Share the key only with the intended Mac and use Settings → Security to rotate it. The current app accepts any non-empty pairing key. Use generated keys: a short, self-chosen key may be guessed from a recorded pairing exchange. A short key also requires the current Mousehare build on Windows.
+- The key is retained in the per-user settings file so the connection can be remembered. On macOS the file is owner-readable only; Windows uses the current user's profile permissions. A process with access to that user account can read the key, so rotate it if exposed.
+- Pairing uses a challenge-response over ephemeral X25519 keys. Control messages are encrypted with AES-GCM, authenticated, and sequence-checked to reject replay or tampering. The pairing key is not sent over the network.
+- A paired computer can still control the other computer's mouse and keyboard by design. Pair only with a computer you trust; do not forward the server port to the public internet. The app does not protect against a compromised endpoint or someone who has the pairing key.
+- Plain-text clipboard synchronization is optional and off by default. Turn it on under Settings → Security on both computers, then disconnect and reconnect both sides. It shares only plain text up to 48 KiB over the encrypted channel; images, files, and existing clipboard contents are not sent when a connection starts. Clipboard text can contain passwords or private data, so enable it only on computers and networks you trust.
+- The macOS app remains compatible with Windows servers using the established protocol-v3 format. To use an unrestricted pairing-key length, update the Windows app too.
+- On the Mac, choose the Mac's position relative to Windows on Connect or under Settings → Network. The Mac exits on the edge facing Windows; Windows enters and returns through its matching edge.
 - Discovery is unavailable in this protocol, so manual IP and port configuration remains the connection path.
 - Closing the app stops its backend. Disconnecting the Mac also restores its local cursor and mouse association.
 
@@ -38,9 +42,11 @@ Settings are stored per user in `~/Library/Application Support/Mousehare/setting
 
 The app uses Python's built-in Tkinter UI. Platform input handling stays in the existing agents:
 
-- `mouseshare/mac/mac_app.py`: Quartz event capture, right-edge handoff, TCP client and reconnect loop.
-- `mouseshare/windows/windows_app.py`: TCP server, pairing check, pynput injection and return-edge monitoring.
-- `mouseshare/mac/protocol.py` and `mouseshare/windows/protocol.py`: the existing 4-byte big-endian length-prefixed JSON messages.
+- `mouseshare/mac/mac_app.py`: Quartz event capture, position-aware handoff, TCP client and reconnect loop.
+- `mouseshare/windows/windows_app.py`: TCP server, pynput injection and position-aware return-edge monitoring.
+- `mouseshare/secure_transport.py`: pairing handshake, ephemeral key exchange, AES-GCM encryption, and replay protection.
+- `mouseshare/clipboard_sync.py`: opt-in plain-text clipboard polling, platform clipboard access, and size validation.
+- `mouseshare/mac/protocol.py` and `mouseshare/windows/protocol.py`: 4-byte big-endian length-prefixed transport frames.
 
 Use Python 3.13 on macOS and Python 3.12 on Windows for the pinned release toolchains. Install the matching platform requirements file, then run `python mouseshare_app.py` for development. Platform-specific input features require real macOS Accessibility/Input Monitoring permissions or a Windows desktop session.
 

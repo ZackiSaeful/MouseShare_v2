@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+MACOS_CODESIGN_IDENTITY="${MACOS_CODESIGN_IDENTITY:--}"
 BUILD_ENV="$ROOT/.build/venv-macos"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -30,6 +31,7 @@ fi
   --icon "$ROOT/.build/icons/mouseshare.icns" \
   --paths "$ROOT" \
   --collect-all pystray \
+  --collect-all cryptography \
   --hidden-import Quartz --hidden-import CoreFoundation --hidden-import AppKit \
   mouseshare_app.py
 
@@ -39,7 +41,14 @@ PLIST="$APP/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :NSAccessibilityUsageDescription Mousehare needs Accessibility permission to share keyboard and mouse input.' "$PLIST"
 /usr/libexec/PlistBuddy -c 'Add :NSInputMonitoringUsageDescription string Mousehare needs Input Monitoring permission to capture keyboard and mouse input.' "$PLIST" 2>/dev/null || \
   /usr/libexec/PlistBuddy -c 'Set :NSInputMonitoringUsageDescription Mousehare needs Input Monitoring permission to capture keyboard and mouse input.' "$PLIST"
-codesign --force --deep --sign - --identifier com.mousehare.desktop "$APP"
+if [[ "$MACOS_CODESIGN_IDENTITY" == "-" ]]; then
+  echo "Signing ad hoc for local use. macOS privacy approvals may need to be renewed after a rebuild."
+  codesign --force --deep --sign - --identifier com.mousehare.desktop "$APP"
+else
+  echo "Signing with: $MACOS_CODESIGN_IDENTITY"
+  codesign --force --deep --options runtime --timestamp \
+    --sign "$MACOS_CODESIGN_IDENTITY" --identifier com.mousehare.desktop "$APP"
+fi
 codesign --verify --deep --strict "$APP"
 
 STAGE="$ROOT/.build/dmg-stage"

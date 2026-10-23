@@ -5,7 +5,7 @@ MouseShare -- Windows Agent
 * TCP server: accepts one connection from the Mac agent.
 * Performs handshake and token verification.
 * Receives input events and injects them via pynput.
-* Monitors cursor position; sends edge=left to Mac when cursor hits left edge.
+* Monitors the edge selected by the Mac's placement and returns control there.
 * System tray icon shows connection/active state.
 
 Run on Windows:
@@ -41,8 +41,12 @@ except ImportError as _e:
 
 try:
     from .protocol import recv_message, send_message
+    from ..secure_transport import HandshakeError, server_handshake
+    from ..clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
 except ImportError:  # Direct legacy execution: python windows_app.py
     from protocol import recv_message, send_message
+    from mouseshare.secure_transport import HandshakeError, server_handshake
+    from mouseshare.clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
 
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -69,12 +73,16 @@ class WinState:
         self.lock        = threading.Lock()
         self.active      = False   # True == WINDOWS_ACTIVE (receiving remote input)
         self.client_sock = None    # current Mac TCP socket
+        self.client_channel = None # authenticated encrypted stream
+        self.clipboard_sync_enabled = False
         self.injecting   = False   # True while injecting a mouse movement
 
 
 STATE  = WinState()
 CONFIG: dict = {}
 _status_callback = None
+_clipboard_sync_lock = threading.Lock()
+_clipboard_sync: ClipboardSynchronizer | None = None
 
 
 def _notify_status(status: str, message: str = "") -> None:
@@ -147,11 +155,13 @@ MOUSE_BUTTON_MAP: dict[str, Button] = {
 def _resolve_key(key_dict: dict):
     """Convert a semantic key dict to a pynput Key or KeyCode.
     Returns None if the key is unknown."""
+    if not isinstance(key_dict, dict):
+        return None
     kind  = key_dict.get("kind", "char")
     value = key_dict.get("value", "")
 
     if kind == "char":
-        if len(value) == 1:
+        if isinstance(value, str) and len(value) == 1:
             return KeyCode.from_char(value)
         log.warning("[KEY] Unexpected char value: %r", value)
         return None
@@ -206,20 +216,52 @@ def _update_tray() -> None:
 #  Network helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_send_lock = threading.Lock()
-
-
 def _net_send(msg: dict) -> bool:
     with STATE.lock:
         s = STATE.client_sock
-    if s is None:
+        channel = STATE.client_channel
+    if s is None or channel is None:
         return False
-    with _send_lock:
-        return send_message(s, msg)
+    return channel.send(s, msg, send_message)
+
+
+def _send_clipboard_text(text: str) -> bool:
+    return _net_send({"type": "clipboard", "text": text})
+
+
+def _start_clipboard_sync() -> None:
+    global _clipboard_sync
+    synchronizer = ClipboardSynchronizer(_send_clipboard_text)
+    with _clipboard_sync_lock:
+        previous, _clipboard_sync = _clipboard_sync, synchronizer
+    if previous is not None:
+        previous.stop()
+    synchronizer.start()
+    log.info("[CLIPBOARD] Plain-text sync started (48 KiB maximum)")
+
+
+def _stop_clipboard_sync() -> None:
+    global _clipboard_sync
+    with _clipboard_sync_lock:
+        synchronizer, _clipboard_sync = _clipboard_sync, None
+    if synchronizer is not None:
+        synchronizer.stop()
+        log.info("[CLIPBOARD] Sync stopped")
+
+
+def _apply_remote_clipboard(msg: dict) -> None:
+    text = msg.get("text")
+    if not valid_clipboard_text(text):
+        log.warning("[CLIPBOARD] Ignoring invalid or oversized clipboard message")
+        return
+    with _clipboard_sync_lock:
+        synchronizer = _clipboard_sync
+    if synchronizer is not None:
+        synchronizer.apply_remote(text)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  Edge detection (Windows cursor reaching left edge)
+#  Edge detection (Windows cursor reaching its edge facing Mac)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _edge_sent = False
@@ -228,7 +270,7 @@ _edge_lock = threading.Lock()
 
 def _on_mouse_move(x: int, y: int) -> None:
     """pynput mouse listener callback.
-    Detects when cursor reaches the left screen edge while WINDOWS_ACTIVE.
+    Detects the Windows edge facing the configured Mac position.
 
     The _edge_sent flag prevents sending the edge notification more than once
     per crossing (debounce). It resets when the cursor moves away from the edge
@@ -245,21 +287,38 @@ def _on_mouse_move(x: int, y: int) -> None:
         return
 
     threshold = int(CONFIG.get("edge_threshold", 3))
+    edge = CONFIG.get("mac_position", "left")
+    user32 = ctypes.windll.user32
+    left = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+    top = user32.GetSystemMetrics(77)    # SM_YVIRTUALSCREEN
+    width = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+    height = user32.GetSystemMetrics(79) # SM_CYVIRTUALSCREEN
+    limits = {
+        "left": x <= left + threshold,
+        "right": x >= left + width - 1 - threshold,
+        "top": y <= top + threshold,
+        "bottom": y >= top + height - 1 - threshold,
+    }
 
-    if x <= threshold:
+    if limits.get(edge, limits["left"]):
         with _edge_lock:
             if _edge_sent:
                 return          # already sent for this crossing, skip
             _edge_sent = True
 
-        log.info("[EDGE] Windows left edge detected at x=%d", x)
+        log.info("[EDGE] Windows %s edge detected at x=%d y=%d", edge, x, y)
 
         # Immediately mark inactive (prevents further edge sends)
         with STATE.lock:
             STATE.active = False
 
-        # Notify Mac
-        _net_send({"type": "edge", "edge": "left"})
+        # Preserve relative position when returning to a different-sized display.
+        along_start = top if edge in ("left", "right") else left
+        along_extent = height if edge in ("left", "right") else width
+        along = y if edge in ("left", "right") else x
+        fraction = (along - along_start) / max(1, along_extent - 1)
+        fraction = max(0.0, min(1.0, fraction))
+        _net_send({"type": "edge", "edge": edge, "position": fraction})
         _update_tray()
 
     else:
@@ -272,12 +331,37 @@ def _on_mouse_move(x: int, y: int) -> None:
 #  Message handlers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _handle_activate_windows() -> None:
+def _place_cursor_at_peer_edge(edge: str, fraction: float) -> None:
+    """Place the Windows cursor at the edge where it enters from the Mac."""
+    try:
+        user32 = ctypes.windll.user32
+        left = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
+        top = user32.GetSystemMetrics(77)    # SM_YVIRTUALSCREEN
+        width = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+        height = user32.GetSystemMetrics(79) # SM_CYVIRTUALSCREEN
+        edge = edge if edge in ("left", "right", "top", "bottom") else "left"
+        inset = max(6, int(CONFIG.get("edge_threshold", 3)) * 2 + 2)
+        if edge in ("left", "right"):
+            x = left + inset if edge == "left" else left + width - 1 - inset
+            y = top + round(fraction * max(0, height - 1))
+        else:
+            x = left + round(fraction * max(0, width - 1))
+            y = top + inset if edge == "top" else top + height - 1 - inset
+        if not user32.SetCursorPos(x, y):
+            log.warning("[CURSOR] Windows refused edge placement at %d,%d", x, y)
+    except Exception as exc:
+        log.warning("[CURSOR] Could not place cursor at peer edge: %s", exc)
+
+def _handle_activate_windows(msg: dict) -> None:
     """Mac is sending input to Windows now."""
     log.info("[STATE] WINDOWS_ACTIVE")
     global _edge_sent
     with _edge_lock:
         _edge_sent = False   # fresh start -- reset debounce
+    position = msg.get("position", 0.5)
+    if isinstance(position, (int, float)) and not isinstance(position, bool) \
+            and 0.0 <= position <= 1.0:
+        _place_cursor_at_peer_edge(CONFIG.get("mac_position", "left"), float(position))
     with STATE.lock:
         STATE.active = True
     _update_tray()
@@ -294,6 +378,8 @@ def _handle_deactivate_windows() -> None:
 def _handle_key(msg: dict) -> None:
     """Inject a keyboard event."""
     action = msg.get("action")
+    if action not in ("press", "release"):
+        return
     key    = _resolve_key(msg.get("key", {}))
     if key is None:
         return
@@ -302,10 +388,8 @@ def _handle_key(msg: dict) -> None:
     try:
         if action == "press":
             _kb.press(key)
-        elif action == "release":
-            _kb.release(key)
         else:
-            log.warning("[KEY] Unknown action: %r", action)
+            _kb.release(key)
     except Exception as exc:
         log.error("[KEY] Injection error: %s", exc)
 
@@ -316,8 +400,9 @@ def _handle_mouse_move(msg: dict) -> None:
     Uses the injecting flag so that the on_mouse_move callback can identify
     programmatic movements vs. user-initiated movements (feedback-loop guard).
     """
-    dx = int(msg.get("dx", 0))
-    dy = int(msg.get("dy", 0))
+    dx, dy = msg.get("dx"), msg.get("dy")
+    if type(dx) is not int or type(dy) is not int or abs(dx) > 10000 or abs(dy) > 10000:
+        return
     if not (dx or dy):
         return
     if CONFIG.get("debug"):
@@ -335,9 +420,11 @@ def _handle_mouse_move(msg: dict) -> None:
 
 def _handle_mouse_click(msg: dict) -> None:
     """Inject a mouse button press or release."""
-    btn_name = msg.get("button", "left")
-    pressed  = bool(msg.get("pressed", True))
-    btn      = MOUSE_BUTTON_MAP.get(btn_name, Button.left)
+    btn_name = msg.get("button")
+    pressed  = msg.get("pressed")
+    if btn_name not in MOUSE_BUTTON_MAP or type(pressed) is not bool:
+        return
+    btn = MOUSE_BUTTON_MAP[btn_name]
     try:
         if pressed:
             _ms.press(btn)
@@ -349,8 +436,9 @@ def _handle_mouse_click(msg: dict) -> None:
 
 def _handle_mouse_scroll(msg: dict) -> None:
     """Inject a scroll wheel event."""
-    dx = int(msg.get("dx", 0))
-    dy = int(msg.get("dy", 0))
+    dx, dy = msg.get("dx"), msg.get("dy")
+    if type(dx) is not int or type(dy) is not int or abs(dx) > 1000 or abs(dy) > 1000:
+        return
     try:
         _ms.scroll(dx, dy)
     except Exception as exc:
@@ -359,11 +447,13 @@ def _handle_mouse_scroll(msg: dict) -> None:
 
 def _dispatch(msg: dict) -> None:
     """Route an incoming message to the appropriate handler."""
+    if not isinstance(msg, dict):
+        return
     msg_type = msg.get("type")
     log.debug("[NETWORK] <- %s", msg_type)
 
     if msg_type == "activate_windows":
-        _handle_activate_windows()
+        _handle_activate_windows(msg)
     elif msg_type == "deactivate_windows":
         _handle_deactivate_windows()
     elif msg_type == "key":
@@ -374,6 +464,11 @@ def _dispatch(msg: dict) -> None:
         _handle_mouse_click(msg)
     elif msg_type == "mouse_scroll":
         _handle_mouse_scroll(msg)
+    elif msg_type == "clipboard":
+        with STATE.lock:
+            enabled = STATE.clipboard_sync_enabled
+        if enabled:
+            _apply_remote_clipboard(msg)
     else:
         log.debug("[NETWORK] Unknown message type: %r", msg_type)
 
@@ -388,38 +483,34 @@ def _handle_client(conn: socket.socket, addr) -> None:
     # ── Handshake ─────────────────────────────────────────────────────────────
     try:
         conn.settimeout(10.0)
-        hello = recv_message(conn)
-        if hello is None or hello.get("type") != "hello":
-            log.warning("[NETWORK] Bad handshake -- closing")
-            conn.close()
-            return
-
-        if hello.get("token", "") != CONFIG["token"]:
-            log.warning("[NETWORK] Auth failed -- wrong token")
-            send_message(conn, {"type": "hello_error"})
-            conn.close()
-            return
+        clipboard_preference = CONFIG.get("clipboard_sync", False)
+        channel, mac_position, clipboard_enabled = server_handshake(
+            conn, CONFIG["token"], clipboard_preference, send_message, recv_message)
 
         with STATE.lock:
             already_connected = STATE.client_sock is not None
             if not already_connected:
                 STATE.client_sock = conn
+                STATE.client_channel = channel
                 STATE.active = False
+                STATE.clipboard_sync_enabled = clipboard_enabled
         if already_connected:
             log.warning("[NETWORK] Rejecting extra client while one is paired")
-            send_message(conn, {"type": "hello_error"})
             conn.close()
             return
-
-        if not send_message(conn, {"type": "hello_ok"}):
-            with STATE.lock:
-                if STATE.client_sock is conn:
-                    STATE.client_sock = None
-            conn.close()
-            return
+        CONFIG["mac_position"] = mac_position
         conn.settimeout(None)
-        log.info("[NETWORK] Handshake OK")
+        log.info("[NETWORK] Secure pairing OK; Mac is %s of Windows", mac_position)
+        if clipboard_enabled:
+            _start_clipboard_sync()
 
+    except HandshakeError as exc:
+        log.warning("[NETWORK] Secure pairing rejected: %s", exc)
+        try:
+            conn.close()
+        except OSError:
+            pass
+        return
     except Exception as exc:
         log.error("[NETWORK] Handshake exception: %s", exc)
         try:
@@ -429,11 +520,16 @@ def _handle_client(conn: socket.socket, addr) -> None:
         return
 
     _update_tray()
-    _notify_status("connected", f"Connected to client {addr[0]}.")
+    status_message = f"Securely paired with {addr[0]}; Mac is {mac_position} of Windows."
+    if clipboard_enabled:
+        status_message += " Plain-text clipboard sync is active."
+    else:
+        status_message += " Clipboard text sharing is off; both devices must enable it."
+    _notify_status("connected", status_message)
 
     # ── Receive loop ─────────────────────────────────────────────────────────
     while True:
-        msg = recv_message(conn)
+        msg = channel.receive(conn, recv_message)
         if msg is None:
             log.info("[NETWORK] Client disconnected")
             break
@@ -445,8 +541,12 @@ def _handle_client(conn: socket.socket, addr) -> None:
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
     with STATE.lock:
-        STATE.active      = False
-        STATE.client_sock = None
+        if STATE.client_sock is conn:
+            STATE.active = False
+            STATE.client_sock = None
+            STATE.client_channel = None
+            STATE.clipboard_sync_enabled = False
+    _stop_clipboard_sync()
     _update_tray()
     if not _server_stop.is_set():
         _notify_status("disconnected", "Client disconnected. Server is still listening.")
@@ -463,11 +563,32 @@ def _handle_client(conn: socket.socket, addr) -> None:
 _server_stop = threading.Event()
 _server_socket: socket.socket | None = None
 _server_thread: threading.Thread | None = None
+_client_slots = threading.BoundedSemaphore(4)
+
+
+def _serve_client_limited(conn: socket.socket, addr) -> None:
+    try:
+        _handle_client(conn, addr)
+    finally:
+        _client_slots.release()
 
 
 def _run_server() -> None:
     global _server_socket
     host = CONFIG.get("host", "0.0.0.0")
+    if host in ("", "0.0.0.0"):
+        # Keep legacy configurations that requested all interfaces scoped to
+        # the active LAN route instead of exposing Mousehare on every adapter.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("192.0.2.1", 1))
+            host = probe.getsockname()[0]
+            if host.startswith("127."):
+                host = "127.0.0.1"
+        except OSError:
+            host = "127.0.0.1"
+        finally:
+            probe.close()
     port = CONFIG["port"]
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -496,9 +617,13 @@ def _run_server() -> None:
         except OSError:
             break
 
-        # Only allow one Mac at a time; spin up a handler thread
+        # Bound concurrent handshakes so unauthenticated sockets cannot spawn
+        # an unlimited number of waiting threads.
+        if not _client_slots.acquire(blocking=False):
+            conn.close()
+            continue
         threading.Thread(
-            target=_handle_client,
+            target=_serve_client_limited,
             args=(conn, addr),
             daemon=True,
             name="ClientHandler",
@@ -550,6 +675,7 @@ def stop_backend() -> None:
     """Stop accepting connections and release the listening socket."""
     _server_stop.set()
     _stop_mouse_listener()
+    _stop_clipboard_sync()
     with STATE.lock:
         client = STATE.client_sock
     if client:
@@ -561,6 +687,11 @@ def stop_backend() -> None:
             client.close()
         except OSError:
             pass
+    with STATE.lock:
+        STATE.client_sock = None
+        STATE.client_channel = None
+        STATE.clipboard_sync_enabled = False
+        STATE.active = False
     server = _server_socket
     if server:
         try:

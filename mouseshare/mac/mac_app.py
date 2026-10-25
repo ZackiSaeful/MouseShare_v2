@@ -27,9 +27,8 @@ try:
     import Quartz
     from Quartz import (
         CGAssociateMouseAndMouseCursorPosition,
+        CGDisplayBounds,
         CGDisplayHideCursor,
-        CGDisplayPixelsHigh,
-        CGDisplayPixelsWide,
         CGDisplayShowCursor,
         CGEventGetFlags,
         CGEventGetIntegerValueField,
@@ -63,6 +62,8 @@ try:
         kCGEventRightMouseUp,
         kCGEventScrollWheel,
         kCGEventTapOptionDefault,
+        kCGEventTapDisabledByTimeout,
+        kCGEventTapDisabledByUserInput,
         kCGHeadInsertEventTap,
         kCGKeyboardEventKeycode,
         kCGMouseEventDeltaX,
@@ -384,6 +385,14 @@ _last_edge_coord: int = 500
 # This ensures the event tap immediately starts suppressing mouse events without
 # waiting for the async thread to call _dissociate_mouse() / _hide_cursor().
 _switching_to_win: bool = False
+_switching_to_mac: bool = False
+
+
+def _main_display_geometry() -> tuple[float, float, float, float]:
+    """Return main display bounds in Quartz points, matching event coordinates."""
+    bounds = CGDisplayBounds(CGMainDisplayID())
+    return (float(bounds.origin.x), float(bounds.origin.y),
+            float(bounds.size.width), float(bounds.size.height))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -578,10 +587,10 @@ def switch_to_windows() -> None:
         # Step 1: queue activation before accepting movement input.  The same
         # ordered worker forwards later deltas, so Windows always activates
         # before it receives its first mouse movement.
-        sw = int(CGDisplayPixelsWide(CGMainDisplayID()))
-        sh = int(CGDisplayPixelsHigh(CGMainDisplayID()))
-        extent = sh if mac_exit_edge in ("left", "right") else sw
-        fraction = _last_edge_coord / max(1, extent - 1)
+        left, top, width, height = _main_display_geometry()
+        origin = top if mac_exit_edge in ("left", "right") else left
+        extent = height if mac_exit_edge in ("left", "right") else width
+        fraction = (_last_edge_coord - origin) / max(1, extent - 1)
         if not _queue_remote_input({
             "type": "activate_windows",
             "position": max(0.0, min(1.0, fraction)),
@@ -594,15 +603,14 @@ def switch_to_windows() -> None:
         _switching_to_win = False
         # Step 3: park the cursor on the selected edge before entering
         # delta-only mode.
-        sw = int(CGDisplayPixelsWide(CGMainDisplayID()))
-        sh = int(CGDisplayPixelsHigh(CGMainDisplayID()))
+        left, top, width, height = _main_display_geometry()
         if mac_exit_edge in ("left", "right"):
-            safe = max(0, min(_last_edge_coord, sh - 1))
-            x = 5 if mac_exit_edge == "left" else sw - 6
+            safe = max(int(top), min(int(_last_edge_coord), int(top + height - 1)))
+            x = left + 5 if mac_exit_edge == "left" else left + width - 6
             point = (x, safe)
         else:
-            safe = max(0, min(_last_edge_coord, sw - 1))
-            y = 5 if mac_exit_edge == "top" else sh - 6
+            safe = max(int(left), min(int(_last_edge_coord), int(left + width - 1)))
+            y = top + 5 if mac_exit_edge == "top" else top + height - 6
             point = (safe, y)
         CGWarpMouseCursorPosition(point)
         # Step 5: detach physical mouse from cursor (delta-only mode)
@@ -615,43 +623,49 @@ def switch_to_windows() -> None:
 def switch_to_mac(windows_edge: str, position: float | None = None) -> None:
     """Atomic transition: WINDOWS_ACTIVE -> MAC_ACTIVE.
     Triggered when Windows reports its selected edge."""
+    global _switching_to_mac
     with _transition_lock:
         with STATE._lock:
             if STATE.dev != DevState.WINDOWS_ACTIVE:
                 return
 
-        mac_entry_edge = opposite_edge(windows_edge)
-        log.info("[EDGE] Windows %s edge -- switching to Mac %s edge",
-                 windows_edge, mac_entry_edge)
+        _switching_to_mac = True
+        try:
+            mac_entry_edge = opposite_edge(windows_edge)
+            log.info("[EDGE] Windows %s edge -- switching to Mac %s edge",
+                     windows_edge, mac_entry_edge)
 
-        # Step 1: update state (stops forwarding in event tap callback)
-        STATE.set_mac_active()
-        # Step 2: tell Windows to stop after every previously queued input
-        # event has been delivered.
-        if not _queue_remote_input({"type": "deactivate_windows"}):
-            _on_conn_lost()
-        # Warp to the Mac edge facing Windows, preserving the cross-edge position.
-        sw = int(CGDisplayPixelsWide(CGMainDisplayID()))
-        sh = int(CGDisplayPixelsHigh(CGMainDisplayID()))
-        global _last_edge_coord
-        if isinstance(position, (int, float)) and not isinstance(position, bool) \
-                and 0.0 <= position <= 1.0:
-            extent = sh if mac_entry_edge in ("left", "right") else sw
-            _last_edge_coord = round(position * max(0, extent - 1))
-        if mac_entry_edge in ("left", "right"):
-            safe = max(0, min(_last_edge_coord, sh - 1))
-            x = 5 if mac_entry_edge == "left" else sw - 6
-            point = (x, safe)
-        else:
-            safe = max(0, min(_last_edge_coord, sw - 1))
-            y = 5 if mac_entry_edge == "top" else sh - 6
-            point = (safe, y)
-        CGWarpMouseCursorPosition(point)
-        log.debug("[CURSOR] Warped to Mac %s edge at %s", mac_entry_edge, point)
-        # Step 4: re-attach physical mouse to cursor
-        _associate_mouse()
-        # Step 5: make cursor visible at its new left-edge position
-        _show_cursor()
+            # Keep local events suppressed until its cursor has been restored.
+            if not _queue_remote_input({"type": "deactivate_windows"}):
+                _on_conn_lost()
+                return
+
+            # Warp to the matching edge and preserve the relative coordinate.
+            left, top, width, height = _main_display_geometry()
+            if isinstance(position, (int, float)) and not isinstance(position, bool) \
+                    and 0.0 <= position <= 1.0:
+                extent = height if mac_entry_edge in ("left", "right") else width
+                origin = top if mac_entry_edge in ("left", "right") else left
+                _last_edge_coord = round(origin + position * max(0, extent - 1))
+            if mac_entry_edge in ("left", "right"):
+                safe = max(int(top), min(int(_last_edge_coord), int(top + height - 1)))
+                x = left + 5 if mac_entry_edge == "left" else left + width - 6
+                point = (x, safe)
+            else:
+                safe = max(int(left), min(int(_last_edge_coord), int(left + width - 1)))
+                y = top + 5 if mac_entry_edge == "top" else top + height - 6
+                point = (safe, y)
+            CGWarpMouseCursorPosition(point)
+            log.debug("[CURSOR] Warped to Mac %s edge at %s", mac_entry_edge, point)
+            _associate_mouse()
+            _show_cursor()
+            STATE.set_mac_active()
+        except Exception:
+            log.exception("[EDGE] Could not complete Windows-to-Mac handoff")
+            restore_mac_safe()
+            STATE.set_mac_active()
+        finally:
+            _switching_to_mac = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -663,7 +677,19 @@ def _handle_event(proxy, event_type: int, event, refcon):
     Return *event* to pass through, or *None* to suppress from Mac apps."""
     global _prev_flags, _last_edge_coord, _switching_to_win
 
+    if event_type in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
+        # macOS can disable a tap after a timeout. Re-enable it immediately so
+        # captured input does not start leaking to local applications.
+        if _event_tap_ref is not None:
+            log.warning("[EVENT TAP] macOS disabled the tap (type=%s); re-enabling", event_type)
+            CGEventTapEnable(_event_tap_ref, True)
+        return event
+
     win = STATE.is_windows_active   # read once per event (atomic)
+    switching = _switching_to_win or _switching_to_mac
+    if _switching_to_mac:
+        # Do not enqueue events after deactivate_windows in the ordered queue.
+        return None
 
     # ── Key down / key up ─────────────────────────────────────────────────────
     if event_type in (kCGEventKeyDown, kCGEventKeyUp):
@@ -678,7 +704,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
             if not ok:
                 threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None   # suppress: key must NOT reach Mac apps
-        return event      # MAC_ACTIVE: pass through normally
+        return None if switching else event
 
     # ── Modifier flags changed ─────────────────────────────────────────────────
     if event_type == kCGEventFlagsChanged:
@@ -700,7 +726,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
                     }):
                         threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None   # suppress modifier events from Mac
-        return event
+        return None if switching else event
 
     # ── Mouse movement and button-drag ────────────────────────────────────────
     if event_type in (
@@ -711,8 +737,8 @@ def _handle_event(proxy, event_type: int, event, refcon):
     ):
         # Suppress if WINDOWS_ACTIVE **or** if we just detected the edge and
         # are about to switch (the async thread hasn't run yet).
-        if win or _switching_to_win:
-            if win:
+        if win or switching:
+            if win and not _switching_to_mac:
                 # Use delta fields (cursor is dissociated, absolute pos is frozen)
                 dx = int(CGEventGetIntegerValueField(event, kCGMouseEventDeltaX))
                 dy = int(CGEventGetIntegerValueField(event, kCGMouseEventDeltaY))
@@ -724,15 +750,14 @@ def _handle_event(proxy, event_type: int, event, refcon):
 
         # MAC_ACTIVE: detect the edge facing the Windows computer.
         pt     = CGEventGetLocation(event)
-        sw     = int(CGDisplayPixelsWide(CGMainDisplayID()))
-        sh     = int(CGDisplayPixelsHigh(CGMainDisplayID()))
+        left, top, width, height = _main_display_geometry()
         thresh = int(CONFIG.get("edge_threshold", 3))
         mac_exit_edge = opposite_edge(CONFIG.get("mac_position", "left"))
         at_edge = {
-            "left": pt.x <= thresh,
-            "right": pt.x >= sw - thresh,
-            "top": pt.y <= thresh,
-            "bottom": pt.y >= sh - thresh,
+            "left": pt.x <= left + thresh,
+            "right": pt.x >= left + width - thresh,
+            "top": pt.y <= top + thresh,
+            "bottom": pt.y >= top + height - thresh,
         }[mac_exit_edge]
         if at_edge:
             _last_edge_coord = int(pt.y if mac_exit_edge in ("left", "right") else pt.x)
@@ -742,7 +767,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
             # Spawn a new thread so we don't block the event tap run loop
             threading.Thread(target=switch_to_windows, daemon=True).start()
             return None   # suppress this edge-triggering event too
-        return event
+        return None if switching else event
 
     # ── Mouse buttons ─────────────────────────────────────────────────────────
     _BTN_MAP = {
@@ -761,7 +786,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
             }):
                 threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None
-        return event
+        return None if switching else event
 
     # ── Scroll wheel ──────────────────────────────────────────────────────────
     if event_type == kCGEventScrollWheel:
@@ -771,7 +796,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
             if not _queue_remote_input({"type": "mouse_scroll", "dx": dx, "dy": dy}):
                 threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None
-        return event
+        return None if switching else event
 
     return event
 

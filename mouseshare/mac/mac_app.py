@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
+from logging.handlers import RotatingFileHandler
+import os
 import socket
 import sys
 import threading
@@ -103,12 +105,38 @@ except ImportError:  # Direct legacy execution: python mac_app.py
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 
+def diagnostic_log_path() -> Path:
+    """Return a user-private log path for the packaged macOS app."""
+    directory = Path.home() / "Library" / "Application Support" / "Mousehare"
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(directory, 0o700)
+    except OSError:
+        # Logging must never stop input restoration or shutdown.
+        pass
+    return directory / "Mousehare.log"
+
+
 def _setup_logging(debug: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    """Configure concise console logging and a rotating private diagnostic log."""
+    level = logging.DEBUG if debug else logging.INFO
+    root = logging.getLogger()
+    root.setLevel(level)
+    if not root.handlers:
+        logging.basicConfig(level=level, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    log_path = diagnostic_log_path()
+    if not any(getattr(handler, "name", "") == "mousehare-diagnostic-log"
+               for handler in root.handlers):
+        try:
+            handler = RotatingFileHandler(
+                log_path, maxBytes=512 * 1024, backupCount=2, encoding="utf-8"
+            )
+            handler.name = "mousehare-diagnostic-log"
+            handler.setLevel(level)
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            root.addHandler(handler)
+        except OSError:
+            pass
 
 
 def _running_app_path() -> str:
@@ -122,6 +150,36 @@ def _running_app_path() -> str:
         return str(executable)
     except OSError:
         return sys.executable
+
+
+def input_permission_diagnostic(*, request_access: bool = False) -> dict[str, object]:
+    """Read macOS input permissions for this exact process.
+
+    ``request_access`` is intended for a direct UI action on the application's
+    main thread. Event-tap threads must only read this state: requesting TCC
+    access from a worker thread can leave macOS without a usable prompt.
+    """
+    report: dict[str, object] = {
+        "app_path": _running_app_path(),
+        "accessibility": None,
+        "input_monitoring": None,
+        "log_path": str(diagnostic_log_path()),
+    }
+    try:
+        post_access = bool(CGPreflightPostEventAccess())
+        listen_access = bool(CGPreflightListenEventAccess())
+        if request_access:
+            if not post_access:
+                CGRequestPostEventAccess()
+            if not listen_access:
+                CGRequestListenEventAccess()
+            post_access = bool(CGPreflightPostEventAccess())
+            listen_access = bool(CGPreflightListenEventAccess())
+        report["accessibility"] = post_access
+        report["input_monitoring"] = listen_access
+    except Exception as exc:
+        report["error"] = str(exc)
+    return report
 
 
 log = logging.getLogger(__name__)
@@ -734,23 +792,13 @@ _backend_generation = 0
 def _run_event_tap(generation: int | None = None) -> None:
     global _run_loop_ref, _event_tap_ref
 
-    # Ask macOS to present its native permission prompt when this app copy has
-    # not yet been approved. Preflight again because the user may approve from
-    # that prompt before the tap is created.
-    try:
-        post_access = bool(CGPreflightPostEventAccess())
-        listen_access = bool(CGPreflightListenEventAccess())
-        log.info("[PERMISSION] Accessibility/event posting=%s; Input Monitoring=%s",
-                 post_access, listen_access)
-        if not post_access:
-            CGRequestPostEventAccess()
-        if not listen_access:
-            CGRequestListenEventAccess()
-        post_access = bool(CGPreflightPostEventAccess())
-        listen_access = bool(CGPreflightListenEventAccess())
-    except Exception:
-        log.exception("[PERMISSION] Could not query macOS input permissions")
-        post_access = listen_access = None
+    # Permission prompts are requested by start_backend on the UI thread.
+    # This worker thread only observes the result before installing the tap.
+    permission_report = input_permission_diagnostic()
+    post_access = permission_report["accessibility"]
+    listen_access = permission_report["input_monitoring"]
+    log.info("[PERMISSION] Accessibility/event posting=%s; Input Monitoring=%s",
+             post_access, listen_access)
 
     event_mask = (
         CGEventMaskBit(kCGEventKeyDown)            |
@@ -1030,6 +1078,23 @@ def start_backend(config: dict, status_callback=None) -> None:
     _event_tap_ready.clear()
     _event_tap_failed.clear()
     _setup_logging(CONFIG.get("debug", False))
+    permission_report = input_permission_diagnostic(request_access=True)
+    post_access = permission_report["accessibility"]
+    listen_access = permission_report["input_monitoring"]
+    if post_access is not True or listen_access is not True:
+        missing = []
+        if post_access is not True:
+            missing.append("Accessibility")
+        if listen_access is not True:
+            missing.append("Input Monitoring")
+        _notify_status(
+            "error",
+            f"macOS has not granted {' and '.join(missing)} to this copy: "
+            f"{permission_report['app_path']}. Approve it in Privacy & Security, "
+            "quit Mousehare, then reopen it. "
+            f"Diagnostic log: {permission_report['log_path']}",
+        )
+        return
     _start_input_queue()
     _notify_status("connecting", "Checking macOS input permissions…")
     _event_tap_thread = threading.Thread(

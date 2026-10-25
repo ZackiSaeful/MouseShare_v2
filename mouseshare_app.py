@@ -158,8 +158,10 @@ class MousehareApp:
             values["client_token"] = ""
         # Older builds offered a white "Light" theme. Migrate it to the
         # dark neutral alternative so amber text stays legible on every screen.
+        # If the user previously had "Light" (which caused white background
+        # with orange text), automatically switch them to TVA (the original dark theme).
         if values.get("theme") == "Light":
-            values["theme"] = "Graphite"
+            values["theme"] = "TVA"
         if values.get("theme") not in PALETTES:
             values["theme"] = "TVA"
         return values
@@ -441,9 +443,12 @@ class MousehareApp:
         return entry
 
     def _readonly_entry(self, parent, variable, width=24):
-        return ttk.Entry(parent, textvariable=variable, width=width,
-                         state="readonly", style="Mousehare.Readonly.TEntry",
-                         font=("Courier New", 11))
+        p = self.palette
+        return tk.Entry(parent, textvariable=variable, width=width,
+                        state="readonly", readonlybackground=p["field"],
+                        fg=p["text"], relief="flat", highlightthickness=1,
+                        highlightbackground=p["line"], highlightcolor=p["accent"],
+                        font=("Courier New", 11))
 
     def _render_connect(self) -> None:
         p = self.palette
@@ -555,9 +560,12 @@ class MousehareApp:
         if ROLE == "client":
             permissions = tk.Frame(details_inner, bg=p["panel"])
             permissions.pack(anchor="w", pady=(8, 0))
+            self._button(permissions, "Check macOS access",
+                         self._check_macos_permissions,
+                         side="left", padx=(0, 8), pady=6)
             self._button(permissions, "Accessibility settings",
                          lambda: self._open_macos_privacy("Privacy_Accessibility"),
-                         side="left", padx=9, pady=6)
+                         side="left", padx=(0, 8), pady=6)
             self._button(permissions, "Input Monitoring settings",
                          lambda: self._open_macos_privacy("Privacy_ListenEvent"),
                          side="left", padx=(8, 9), pady=6)
@@ -791,7 +799,7 @@ class MousehareApp:
                                  style="Mousehare.TCombobox", width=20)
             theme.pack(anchor="w", pady=(6, 12))
             theme.bind("<<ComboboxSelected>>", lambda _event: self._save_theme())
-            tk.Label(wrap, text="Warm amber, bronze and cream colors are tuned for the TVA control-panel style.",
+            tk.Label(wrap, text="Warm amber, bronze and dark TVA control-panel style.",
                      bg=p["panel"], fg=p["muted"], font=("Arial", 9),
                      wraplength=520, justify="left").pack(anchor="w")
 
@@ -934,6 +942,33 @@ class MousehareApp:
         except OSError:
             subprocess.Popen(["open", "-b", "com.apple.systempreferences"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _check_macos_permissions(self) -> None:
+        """Show the TCC state for the exact Mousehare bundle before connecting."""
+        if ROLE != "client":
+            return
+        report = agent.input_permission_diagnostic(request_access=True)
+        accessibility = report.get("accessibility")
+        monitoring = report.get("input_monitoring")
+        app_path = report.get("app_path", "this Mousehare copy")
+        log_path = report.get("log_path", "")
+        if accessibility is True and monitoring is True:
+            self._set_status(
+                "disconnected",
+                f"macOS access is ready for {app_path}. You can connect. Diagnostic log: {log_path}",
+            )
+            return
+        missing = []
+        if accessibility is not True:
+            missing.append("Accessibility")
+        if monitoring is not True:
+            missing.append("Input Monitoring")
+        self._set_status(
+            "error",
+            f"macOS has not granted {' and '.join(missing)} to {app_path}. "
+            "Approve this exact app, then quit and reopen it. "
+            f"Diagnostic log: {log_path}",
+        )
 
     def _render_about(self) -> None:
         p = self.palette

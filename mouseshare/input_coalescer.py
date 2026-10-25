@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 
 
-MOUSE_MOVE_COALESCE_SECONDS = 0.004  # 250 Hz: low latency without packet bursts.
+MOUSE_MOVE_COALESCE_SECONDS = 0.0  # Immediate dispatch for ultra-smooth motion.
 MAX_QUEUED_EVENTS = 1024
 MAX_MOUSE_DELTA = 10_000
 MAX_PENDING_MOUSE_DELTA = 100_000
@@ -128,7 +128,7 @@ class OrderedInputQueue:
                 # Let the next movement collect more deltas for at most 4 ms.
                 # If a click/key/scroll arrives after it, flush immediately so
                 # that non-motion input never waits for the full window.
-                if self._events[0][1].get("type") == "mouse_move":
+                if self._coalesce_seconds > 0 and self._events[0][1].get("type") == "mouse_move":
                     deadline = time.monotonic() + self._coalesce_seconds
                     while not self._stopping:
                         if (len(self._events) > 1

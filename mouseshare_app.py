@@ -63,9 +63,12 @@ def app_data_dir() -> Path:
     else:
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     path = base / APP_NAME
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if sys.platform != "win32":
-        os.chmod(path, 0o700)
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if sys.platform != "win32":
+            os.chmod(path, 0o700)
+    except OSError:
+        pass
     return path
 
 

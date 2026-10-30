@@ -531,6 +531,7 @@ def _stop_input_queue() -> None:
 
 
 def _send_clipboard_text(text: str) -> bool:
+    log.info("[CLIPBOARD] -> Sending %d chars to Windows: %r", len(text), text[:30])
     return _net_send({"type": "clipboard", "text": text})
 
 
@@ -559,6 +560,7 @@ def _apply_remote_clipboard(msg: dict) -> None:
     if not valid_clipboard_text(text):
         log.warning("[CLIPBOARD] Ignoring invalid or oversized clipboard message")
         return
+    log.info("[CLIPBOARD] <- Received %d chars from Windows: %r", len(text), text[:30])
     with _clipboard_sync_lock:
         synchronizer = _clipboard_sync
     if synchronizer is not None:

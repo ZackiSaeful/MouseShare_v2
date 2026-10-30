@@ -237,6 +237,7 @@ def _net_send(msg: dict) -> bool:
 
 
 def _send_clipboard_text(text: str) -> bool:
+    log.info("[CLIPBOARD] -> Sending %d chars to Mac: %r", len(text), text[:30])
     return _net_send({"type": "clipboard", "text": text})
 
 
@@ -262,12 +263,10 @@ def _stop_clipboard_sync() -> None:
 
 def _apply_remote_clipboard(msg: dict) -> None:
     text = msg.get("text")
-    # Empty clipboards are not emitted by the local monitor.  Reject them on
-    # receipt as well so an invalid peer message cannot erase the user's
-    # clipboard.  The wire format remains the shared v3 clipboard contract.
     if not isinstance(text, str) or not text or not valid_clipboard_text(text):
         log.warning("[CLIPBOARD] Ignoring invalid or oversized clipboard message")
         return
+    log.info("[CLIPBOARD] <- Received %d chars from Mac: %r", len(text), text[:30])
     with _clipboard_sync_lock:
         synchronizer = _clipboard_sync
     if synchronizer is not None:

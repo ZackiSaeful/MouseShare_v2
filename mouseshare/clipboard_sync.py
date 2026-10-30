@@ -109,10 +109,11 @@ def _win_api():
 
 
 def _open_windows_clipboard(user32) -> bool:
-    for _attempt in range(8):
+    for _attempt in range(20):
         if user32.OpenClipboard(None):
             return True
         time.sleep(0.025)
+    log.warning("[CLIPBOARD] Windows OpenClipboard busy or locked after 20 attempts")
     return False
 
 
@@ -197,13 +198,17 @@ class ClipboardSynchronizer:
 
     def apply_remote(self, text) -> bool:
         if not valid_clipboard_text(text):
+            log.warning("[CLIPBOARD] Invalid clipboard text received")
             return False
         with self._lock:
             current = read_clipboard_text()
-            if current != text and not write_clipboard_text(text):
-                if self._on_error is not None:
-                    self._on_error("Could not write received text to the system clipboard.")
-                return False
+            if current != text:
+                success = write_clipboard_text(text)
+                log.info("[CLIPBOARD] Applied remote text to local system (%d chars, success=%s)", len(text), success)
+                if not success:
+                    if self._on_error is not None:
+                        self._on_error("Could not write received text to the system clipboard.")
+                    return False
             self._last_text = text
         return True
 

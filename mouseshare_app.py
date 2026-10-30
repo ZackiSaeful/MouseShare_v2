@@ -155,6 +155,9 @@ class MousehareApp:
                 values.update(loaded)
         except (OSError, json.JSONDecodeError):
             pass
+        # Ensure clipboard_sync is True by default even if an old settings.json had it False
+        if not values.get("clipboard_sync_explicitly_disabled", False):
+            values["clipboard_sync"] = True
         if not values.get("server_token") or values["server_token"] == "CHANGE_ME":
             values["server_token"] = secrets.token_urlsafe(16)
         if not isinstance(values.get("server_token"), str) or not values["server_token"]:
@@ -916,7 +919,9 @@ class MousehareApp:
         self._set_status("disconnected", "A new pairing key was generated.")
 
     def _on_clipboard_toggle(self) -> None:
-        self.settings["clipboard_sync"] = bool(self.clipboard_sync_var.get())
+        val = bool(self.clipboard_sync_var.get())
+        self.settings["clipboard_sync"] = val
+        self.settings["clipboard_sync_explicitly_disabled"] = not val
         self._save_settings()
 
     def _save_clipboard_preference(self) -> None:

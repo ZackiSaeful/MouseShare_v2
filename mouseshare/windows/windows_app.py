@@ -21,6 +21,7 @@ import socket
 import sys
 import threading
 from enum import Enum, auto
+from ctypes import wintypes
 from pathlib import Path
 
 try:
@@ -75,7 +76,6 @@ class WinState:
         self.client_sock = None    # current Mac TCP socket
         self.client_channel = None # authenticated encrypted stream
         self.clipboard_sync_enabled = False
-        self.injecting   = False   # True while injecting a mouse movement
 
 
 STATE  = WinState()
@@ -251,7 +251,10 @@ def _stop_clipboard_sync() -> None:
 
 def _apply_remote_clipboard(msg: dict) -> None:
     text = msg.get("text")
-    if not valid_clipboard_text(text):
+    # Empty clipboards are not emitted by the local monitor.  Reject them on
+    # receipt as well so an invalid peer message cannot erase the user's
+    # clipboard.  The wire format remains the shared v3 clipboard contract.
+    if not isinstance(text, str) or not text or not valid_clipboard_text(text):
         log.warning("[CLIPBOARD] Ignoring invalid or oversized clipboard message")
         return
     with _clipboard_sync_lock:
@@ -266,6 +269,140 @@ def _apply_remote_clipboard(msg: dict) -> None:
 
 _edge_sent = False
 _edge_lock = threading.Lock()
+
+_LLMHF_INJECTED = 0x00000001
+_LLMHF_LOWER_IL_INJECTED = 0x00000002
+_SM_XVIRTUALSCREEN = 76
+_SM_YVIRTUALSCREEN = 77
+_SM_CXVIRTUALSCREEN = 78
+_SM_CYVIRTUALSCREEN = 79
+
+
+def _virtual_screen_bounds() -> tuple[int, int, int, int]:
+    """Return (left, top, width, height) in Windows virtual-screen pixels."""
+    user32 = ctypes.windll.user32
+    left = user32.GetSystemMetrics(_SM_XVIRTUALSCREEN)
+    top = user32.GetSystemMetrics(_SM_YVIRTUALSCREEN)
+    width = max(1, user32.GetSystemMetrics(_SM_CXVIRTUALSCREEN))
+    height = max(1, user32.GetSystemMetrics(_SM_CYVIRTUALSCREEN))
+    return left, top, width, height
+
+
+def _monitor_bounds() -> list[tuple[int, int, int, int]]:
+    """Enumerate physical monitor rectangles in virtual-screen coordinates."""
+
+    class _MonitorInfo(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    user32 = ctypes.windll.user32
+    get_monitor_info = user32.GetMonitorInfoW
+    get_monitor_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(_MonitorInfo)]
+    get_monitor_info.restype = wintypes.BOOL
+    callback_type = ctypes.WINFUNCTYPE(
+        wintypes.BOOL,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.RECT),
+        ctypes.c_ssize_t,
+    )
+    monitors: list[tuple[int, int, int, int]] = []
+
+    def collect(monitor, _dc, _rect, _data):
+        info = _MonitorInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if get_monitor_info(monitor, ctypes.byref(info)):
+            rect = info.rcMonitor
+            monitors.append((rect.left, rect.top, rect.right, rect.bottom))
+        return True
+
+    callback = callback_type(collect)
+    enum_monitors = user32.EnumDisplayMonitors
+    enum_monitors.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.RECT),
+        callback_type,
+        ctypes.c_ssize_t,
+    ]
+    enum_monitors.restype = wintypes.BOOL
+    if not enum_monitors(None, None, callback, 0):
+        return []
+    return monitors
+
+
+def _normalized_position(value) -> float | None:
+    """Validate a dimensionless position along a screen edge."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) \
+            and 0.0 <= value <= 1.0:
+        return float(value)
+    return None
+
+
+def _entry_point(edge: str, fraction: float,
+                 bounds: tuple[int, int, int, int],
+                 monitors: list[tuple[int, int, int, int]]) -> tuple[int, int, float]:
+    """Map an edge fraction to a real monitor on the matching desktop edge.
+
+    Fractions are measured across the Windows virtual desktop. If the target
+    falls in a gap between monitors, choose the nearest monitor on that outer
+    edge and clamp to its visible span. This keeps SetCursorPos off a desktop
+    gap while preserving the relative position for ordinary single-screen use.
+    """
+    left, top, width, height = bounds
+    vertical_axis = edge in ("left", "right")
+    along_start = top if vertical_axis else left
+    along_extent = height if vertical_axis else width
+    along = along_start + round(fraction * max(0, along_extent - 1))
+    virtual_right = left + width
+    virtual_bottom = top + height
+
+    if edge == "left":
+        candidates = [rect for rect in monitors if rect[0] == left]
+    elif edge == "right":
+        candidates = [rect for rect in monitors if rect[2] == virtual_right]
+    elif edge == "top":
+        candidates = [rect for rect in monitors if rect[1] == top]
+    else:
+        candidates = [rect for rect in monitors if rect[3] == virtual_bottom]
+
+    rect = min(
+        candidates,
+        key=lambda item: abs(
+            min(max(along, item[1] if vertical_axis else item[0]),
+                (item[3] if vertical_axis else item[2]) - 1) - along
+        ),
+    ) if candidates else (left, top, virtual_right, virtual_bottom)
+
+    rect_left, rect_top, rect_right, rect_bottom = rect
+    low = rect_top if vertical_axis else rect_left
+    high = (rect_bottom if vertical_axis else rect_right) - 1
+    along = min(max(along, low), high)
+    inset = max(6, int(CONFIG.get("edge_threshold", 3)) * 2 + 2)
+    if edge == "left":
+        x = rect_left + min(inset, max(0, rect_right - rect_left - 1))
+        y = along
+    elif edge == "right":
+        x = rect_right - 1 - min(inset, max(0, rect_right - rect_left - 1))
+        y = along
+    elif edge == "top":
+        x = along
+        y = rect_top + min(inset, max(0, rect_bottom - rect_top - 1))
+    else:
+        x = along
+        y = rect_bottom - 1 - min(inset, max(0, rect_bottom - rect_top - 1))
+
+    effective_fraction = (along - along_start) / max(1, along_extent - 1)
+    return x, y, max(0.0, min(1.0, effective_fraction))
+
+
+def _ignore_injected_mouse_event(_msg, data) -> bool:
+    """Keep remotely injected motion out of the physical edge detector."""
+    flags = getattr(data, "flags", 0)
+    return not bool(flags & (_LLMHF_INJECTED | _LLMHF_LOWER_IL_INJECTED))
 
 
 def _on_mouse_move(x: int, y: int) -> None:
@@ -288,11 +425,7 @@ def _on_mouse_move(x: int, y: int) -> None:
 
     threshold = int(CONFIG.get("edge_threshold", 3))
     edge = CONFIG.get("mac_position", "left")
-    user32 = ctypes.windll.user32
-    left = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
-    top = user32.GetSystemMetrics(77)    # SM_YVIRTUALSCREEN
-    width = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
-    height = user32.GetSystemMetrics(79) # SM_CYVIRTUALSCREEN
+    left, top, width, height = _virtual_screen_bounds()
     limits = {
         "left": x <= left + threshold,
         "right": x >= left + width - 1 - threshold,
@@ -301,25 +434,28 @@ def _on_mouse_move(x: int, y: int) -> None:
     }
 
     if limits.get(edge, limits["left"]):
+        vertical_axis = edge in ("left", "right")
+        along_start = top if vertical_axis else left
+        along_extent = height if vertical_axis else width
+        along = y if vertical_axis else x
+        fraction = (along - along_start) / max(1, along_extent - 1)
+        fraction = max(0.0, min(1.0, fraction))
+
         with _edge_lock:
             if _edge_sent:
                 return          # already sent for this crossing, skip
+            # Recheck and transition atomically: a delayed callback must not
+            # return control after a deactivation has already been processed.
+            with STATE.lock:
+                if not STATE.active:
+                    return
+                STATE.active = False
             _edge_sent = True
 
         log.info("[EDGE] Windows %s edge detected at x=%d y=%d", edge, x, y)
-
-        # Immediately mark inactive (prevents further edge sends)
-        with STATE.lock:
-            STATE.active = False
-
-        # Preserve relative position when returning to a different-sized display.
-        along_start = top if edge in ("left", "right") else left
-        along_extent = height if edge in ("left", "right") else width
-        along = y if edge in ("left", "right") else x
-        fraction = (along - along_start) / max(1, along_extent - 1)
-        fraction = max(0.0, min(1.0, fraction))
         _net_send({"type": "edge", "edge": edge, "position": fraction})
         _update_tray()
+        _notify_status("connected", "Mac control resumed at the matching screen position.")
 
     else:
         # Cursor moved away from edge -- reset debounce
@@ -331,40 +467,60 @@ def _on_mouse_move(x: int, y: int) -> None:
 #  Message handlers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _place_cursor_at_peer_edge(edge: str, fraction: float) -> None:
-    """Place the Windows cursor at the edge where it enters from the Mac."""
+def _place_cursor_at_peer_edge(edge: str, fraction: float) -> float | None:
+    """Place the cursor on the configured entry edge and return its fraction.
+
+    The incoming fraction is normalized by the Mac client; mapping it against
+    Windows virtual-screen metrics accounts for different display dimensions.
+    """
     try:
         user32 = ctypes.windll.user32
-        left = user32.GetSystemMetrics(76)   # SM_XVIRTUALSCREEN
-        top = user32.GetSystemMetrics(77)    # SM_YVIRTUALSCREEN
-        width = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
-        height = user32.GetSystemMetrics(79) # SM_CYVIRTUALSCREEN
+        bounds = _virtual_screen_bounds()
         edge = edge if edge in ("left", "right", "top", "bottom") else "left"
-        inset = max(6, int(CONFIG.get("edge_threshold", 3)) * 2 + 2)
-        if edge in ("left", "right"):
-            x = left + inset if edge == "left" else left + width - 1 - inset
-            y = top + round(fraction * max(0, height - 1))
-        else:
-            x = left + round(fraction * max(0, width - 1))
-            y = top + inset if edge == "top" else top + height - 1 - inset
+        x, y, effective_fraction = _entry_point(
+            edge, fraction, bounds, _monitor_bounds())
         if not user32.SetCursorPos(x, y):
             log.warning("[CURSOR] Windows refused edge placement at %d,%d", x, y)
+            return None
+        log.debug("[CURSOR] Entry at %s edge x=%d y=%d fraction=%.4f",
+                  edge, x, y, effective_fraction)
+        return effective_fraction
     except Exception as exc:
         log.warning("[CURSOR] Could not place cursor at peer edge: %s", exc)
+        return None
 
 def _handle_activate_windows(msg: dict) -> None:
     """Mac is sending input to Windows now."""
-    log.info("[STATE] WINDOWS_ACTIVE")
     global _edge_sent
     with _edge_lock:
         _edge_sent = False   # fresh start -- reset debounce
-    position = msg.get("position", 0.5)
-    if isinstance(position, (int, float)) and not isinstance(position, bool) \
-            and 0.0 <= position <= 1.0:
-        _place_cursor_at_peer_edge(CONFIG.get("mac_position", "left"), float(position))
+    position = _normalized_position(msg.get("position"))
+    if position is None:
+        position = 0.5
+        log.warning("[CURSOR] Invalid or missing entry fraction; using screen center")
+    edge = CONFIG.get("mac_position", "left")
+    placed_position = _place_cursor_at_peer_edge(edge, position)
     with STATE.lock:
         STATE.active = True
+    log.info("[STATE] WINDOWS_ACTIVE; cursor %s at %s edge (position %.1f%%)",
+             "placed" if placed_position is not None else "not placed",
+             edge, (placed_position if placed_position is not None else position) * 100)
     _update_tray()
+    ack_position = placed_position if placed_position is not None else position
+    ack_sent = _net_send({
+        "type": "activation_ack",
+        "active": True,
+        "cursor_positioned": placed_position is not None,
+        "edge": edge,
+        "position": ack_position,
+    })
+    status = "Windows control is active"
+    if placed_position is None:
+        status += ", but the cursor could not be placed at the requested edge"
+    if not ack_sent:
+        status += "; the Mac confirmation could not be sent"
+        log.warning("[NETWORK] Windows activation ACK could not be sent")
+    _notify_status("connected", status + ".")
 
 
 def _handle_deactivate_windows() -> None:
@@ -373,6 +529,7 @@ def _handle_deactivate_windows() -> None:
     with STATE.lock:
         STATE.active = False
     _update_tray()
+    _notify_status("connected", "Mac control is active; Windows input injection is paused.")
 
 
 def _handle_key(msg: dict) -> None:
@@ -395,11 +552,7 @@ def _handle_key(msg: dict) -> None:
 
 
 def _handle_mouse_move(msg: dict) -> None:
-    """Inject a relative mouse movement.
-
-    Uses the injecting flag so that the on_mouse_move callback can identify
-    programmatic movements vs. user-initiated movements (feedback-loop guard).
-    """
+    """Inject a relative mouse movement only while Windows owns control."""
     dx, dy = msg.get("dx"), msg.get("dy")
     if type(dx) is not int or type(dy) is not int or abs(dx) > 10000 or abs(dy) > 10000:
         return
@@ -408,14 +561,13 @@ def _handle_mouse_move(msg: dict) -> None:
     if CONFIG.get("debug"):
         log.debug("[MOUSE] dx=%d dy=%d", dx, dy)
     with STATE.lock:
-        STATE.injecting = True
+        active = STATE.active
+    if not active:
+        return
     try:
         _ms.move(dx, dy)
     except Exception as exc:
         log.error("[MOUSE] Move injection error: %s", exc)
-    finally:
-        with STATE.lock:
-            STATE.injecting = False
 
 
 def _handle_mouse_click(msg: dict) -> None:
@@ -646,7 +798,10 @@ _mouse_listener: ms.Listener | None = None
 
 def _start_mouse_listener() -> None:
     global _mouse_listener
-    _mouse_listener = ms.Listener(on_move=_on_mouse_move)
+    _mouse_listener = ms.Listener(
+        on_move=_on_mouse_move,
+        win32_event_filter=_ignore_injected_mouse_event,
+    )
     _mouse_listener.start()
     log.info("[MOUSE] Listener started")
 

@@ -596,6 +596,9 @@ class MousehareApp:
             self._button(permissions, "Check macOS access",
                          self._check_macos_permissions,
                          side="left", padx=(0, 8), pady=6)
+            self._button(permissions, "Open required settings",
+                         self._open_required_macos_privacy,
+                         side="left", padx=(0, 8), pady=6)
             self._button(permissions, "Accessibility settings",
                          lambda: self._open_macos_privacy("Privacy_Accessibility"),
                          side="left", padx=(0, 8), pady=6)
@@ -982,32 +985,46 @@ class MousehareApp:
             subprocess.Popen(["open", "-b", "com.apple.systempreferences"],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def _check_macos_permissions(self) -> None:
-        """Show the TCC state for the exact Mousehare bundle before connecting."""
-        if ROLE != "client":
+    def _open_required_macos_privacy(self) -> None:
+        """Open both TCC panes required by the event tap, one after another."""
+        if sys.platform != "darwin":
             return
+        self._open_macos_privacy("Privacy_Accessibility")
+        # System Settings only shows one pane at a time.  Queue the second
+        # navigation instead of asking the user to find its different section.
+        self.root.after(900, lambda: self._open_macos_privacy("Privacy_ListenEvent"))
+
+    @staticmethod
+    def _missing_macos_permissions(report: dict) -> list[str]:
+        missing = []
+        if report.get("accessibility") is not True:
+            missing.append("Accessibility")
+        if report.get("input_monitoring") is not True:
+            missing.append("Input Monitoring")
+        return missing
+
+    def _check_macos_permissions(self, *, show_ready: bool = True) -> bool:
+        """Check TCC for this exact bundle and return whether input sharing can start."""
+        if ROLE != "client":
+            return True
         report = agent.input_permission_diagnostic(request_access=True)
-        accessibility = report.get("accessibility")
-        monitoring = report.get("input_monitoring")
         app_path = report.get("app_path", "this Mousehare copy")
         log_path = report.get("log_path", "")
-        if accessibility is True and monitoring is True:
-            self._set_status(
-                "disconnected",
-                f"macOS access is ready for {app_path}. You can connect. Diagnostic log: {log_path}",
-            )
-            return
-        missing = []
-        if accessibility is not True:
-            missing.append("Accessibility")
-        if monitoring is not True:
-            missing.append("Input Monitoring")
+        missing = self._missing_macos_permissions(report)
+        if not missing:
+            if show_ready:
+                self._set_status(
+                    "disconnected",
+                    f"macOS access is ready for {app_path}. You can connect. Diagnostic log: {log_path}",
+                )
+            return True
         self._set_status(
             "error",
             f"macOS has not granted {' and '.join(missing)} to {app_path}. "
-            "Approve this exact app, then quit and reopen it. "
+            "Use Open required settings, approve this exact app, then quit and reopen it. "
             f"Diagnostic log: {log_path}",
         )
+        return False
 
     def _render_about(self) -> None:
         p = self.palette
@@ -1191,6 +1208,12 @@ class MousehareApp:
         config = self._validate_and_config()
         if config is None:
             return
+        # Do this on the UI thread, where macOS is allowed to present its TCC
+        # consent prompt. Do not mark the backend as running unless the input
+        # permissions are actually granted.
+        if ROLE == "client" and sys.platform == "darwin" \
+                and not self._check_macos_permissions(show_ready=False):
+            return
         if not self._save_settings():
             return
         self.backend_active = True
@@ -1198,7 +1221,13 @@ class MousehareApp:
         self.primary_button.configure(state="disabled")
         self._set_status("connecting", "Starting Mousehare backend…")
         try:
-            agent.start_backend(config, lambda status, message: self.events.put((status, message)))
+            started = agent.start_backend(
+                config, lambda status, message: self.events.put((status, message))
+            )
+            if started is False:
+                self.backend_active = False
+                self.primary_button.configure(state="normal")
+                self.disconnect_button.configure(state="disabled")
         except Exception as exc:
             self.backend_active = False
             self.primary_button.configure(state="normal")

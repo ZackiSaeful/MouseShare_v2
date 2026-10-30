@@ -21,6 +21,7 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64
+; SignTool=signtool sign /a /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $f
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

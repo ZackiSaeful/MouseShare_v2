@@ -1104,8 +1104,14 @@ def _do_quit(icon=None, _item=None) -> None:
     log.info("[SHUTDOWN] Done -- goodbye!")
 
 
-def start_backend(config: dict, status_callback=None) -> None:
-    """Start the macOS client backend without its legacy menu-bar UI."""
+def start_backend(config: dict, status_callback=None) -> bool:
+    """Start the macOS client backend without its legacy menu-bar UI.
+
+    Returns ``False`` when macOS has not authorised this *installed app copy*.
+    The caller must not report a live backend in that case: no event tap can be
+    installed, so opening a TCP connection would only look successful while
+    mouse and keyboard sharing cannot work.
+    """
     global CONFIG, _status_callback, _backend_generation, _event_tap_thread, _network_thread
     CONFIG = dict(config)
     _status_callback = status_callback
@@ -1131,7 +1137,7 @@ def start_backend(config: dict, status_callback=None) -> None:
             "quit Mousehare, then reopen it. "
             f"Diagnostic log: {permission_report['log_path']}",
         )
-        return
+        return False
     _start_input_queue()
     _notify_status("connecting", "Checking macOS input permissions…")
     _event_tap_thread = threading.Thread(
@@ -1142,6 +1148,7 @@ def start_backend(config: dict, status_callback=None) -> None:
         target=_connect_loop, args=(generation,), daemon=True, name="Network"
     )
     _network_thread.start()
+    return True
 
 
 def stop_backend() -> None:

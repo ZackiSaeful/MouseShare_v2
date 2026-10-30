@@ -386,6 +386,7 @@ _last_edge_coord: int = 500
 # waiting for the async thread to call _dissociate_mouse() / _hide_cursor().
 _switching_to_win: bool = False
 _switching_to_mac: bool = False
+_last_mac_activation_time: float = 0.0
 
 
 def _main_display_geometry() -> tuple[float, float, float, float]:
@@ -625,7 +626,7 @@ def switch_to_windows() -> None:
 def switch_to_mac(windows_edge: str, position: float | None = None) -> None:
     """Atomic transition: WINDOWS_ACTIVE -> MAC_ACTIVE.
     Triggered when Windows reports its selected edge."""
-    global _switching_to_mac
+    global _switching_to_mac, _last_mac_activation_time
     with _transition_lock:
         with STATE._lock:
             if STATE.dev != DevState.WINDOWS_ACTIVE:
@@ -633,6 +634,7 @@ def switch_to_mac(windows_edge: str, position: float | None = None) -> None:
 
         _switching_to_mac = True
         try:
+            _last_mac_activation_time = time.monotonic()
             mac_entry_edge = opposite_edge(windows_edge)
             log.info("[EDGE] Windows %s edge -- switching to Mac %s edge",
                      windows_edge, mac_entry_edge)
@@ -651,11 +653,11 @@ def switch_to_mac(windows_edge: str, position: float | None = None) -> None:
                 _last_edge_coord = round(origin + position * max(0, extent - 1))
             if mac_entry_edge in ("left", "right"):
                 safe = max(int(top), min(int(_last_edge_coord), int(top + height - 1)))
-                x = left + 5 if mac_entry_edge == "left" else left + width - 6
+                x = left + 14 if mac_entry_edge == "left" else left + width - 15
                 point = (x, safe)
             else:
                 safe = max(int(left), min(int(_last_edge_coord), int(left + width - 1)))
-                y = top + 5 if mac_entry_edge == "top" else top + height - 6
+                y = top + 14 if mac_entry_edge == "top" else top + height - 15
                 point = (safe, y)
             CGWarpMouseCursorPosition(point)
             log.debug("[CURSOR] Warped to Mac %s edge at %s", mac_entry_edge, point)
@@ -761,7 +763,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
             "top": pt.y <= top + thresh,
             "bottom": pt.y >= top + height - thresh,
         }[mac_exit_edge]
-        if at_edge:
+        if at_edge and (time.monotonic() - _last_mac_activation_time >= 0.35):
             _last_edge_coord = int(pt.y if mac_exit_edge in ("left", "right") else pt.x)
             _switching_to_win = True   # immediate suppression for next events
             log.info("[EDGE] Mac %s edge at x=%.0f y=%.0f -- triggering switch",
@@ -974,6 +976,14 @@ def _handle_incoming(msg: dict) -> None:
 
     elif msg_type == "clipboard":
         _apply_remote_clipboard(msg)
+
+    elif msg_type == "activation_ack":
+        active = msg.get("active", False)
+        positioned = msg.get("cursor_positioned", False)
+        edge = msg.get("edge", "")
+        pos = msg.get("position", 0.0)
+        log.debug("[STATE] Windows activation ACK: active=%s, cursor_positioned=%s at %s (%s)",
+                  active, positioned, edge, pos)
 
     elif msg_type == "hello_error":
         log.error("[NETWORK] The Windows server rejected pairing.")

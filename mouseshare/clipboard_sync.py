@@ -25,12 +25,13 @@ def valid_clipboard_text(value) -> bool:
     if not isinstance(value, str):
         return False
     try:
-        encoded = value.encode("utf-8")
+        normalized = value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+        encoded = normalized.encode("utf-8")
         serialized = json.dumps(
-            {"type": "clipboard", "text": value},
+            {"type": "clipboard", "text": normalized},
             ensure_ascii=False, separators=(",", ":"), allow_nan=False,
         ).encode("utf-8")
-    except (UnicodeEncodeError, TypeError, ValueError):
+    except (UnicodeEncodeError, UnicodeDecodeError, TypeError, ValueError):
         return False
     return (len(encoded) <= MAX_CLIPBOARD_BYTES
             and len(serialized) <= MAX_PLAINTEXT_BYTES - _CLIPBOARD_MESSAGE_OVERHEAD)
@@ -137,6 +138,10 @@ def _read_windows_clipboard() -> str | None:
         units = size // ctypes.sizeof(ctypes.c_wchar)
         raw = ctypes.wstring_at(pointer, units)
         text = raw.split("\0", 1)[0]
+        try:
+            text = text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+        except Exception:
+            pass
         return text if text and valid_clipboard_text(text) else None
     finally:
         if pointer:
@@ -201,26 +206,37 @@ class ClipboardSynchronizer:
             log.warning("[CLIPBOARD] Invalid clipboard text received")
             return False
         with self._lock:
-            current = read_clipboard_text()
-            if current != text:
-                success = write_clipboard_text(text)
-                log.info("[CLIPBOARD] Applied remote text to local system (%d chars, success=%s)", len(text), success)
-                if not success:
-                    if self._on_error is not None:
-                        self._on_error("Could not write received text to the system clipboard.")
-                    return False
-            self._last_text = text
-        return True
+            try:
+                current = read_clipboard_text()
+                if current != text:
+                    success = write_clipboard_text(text)
+                    log.info("[CLIPBOARD] Applied remote text to local system (%d chars, success=%s)", len(text), success)
+                    if not success:
+                        if self._on_error is not None:
+                            self._on_error("Could not write received text to the system clipboard.")
+                        return False
+                self._last_text = text
+                return True
+            except Exception as exc:
+                log.warning("[CLIPBOARD] Exception applying remote clipboard text: %s", exc)
+                return False
 
     def _run(self) -> None:
         while not self._stop.wait(CLIPBOARD_POLL_SECONDS):
             with self._lock:
-                text = read_clipboard_text()
+                try:
+                    text = read_clipboard_text()
+                except Exception as exc:
+                    log.debug("Clipboard poll read error: %s", exc)
+                    continue
                 if text is None or text == self._last_text:
                     continue
                 # Keep the monitor lock while sending so a simultaneous remote
                 # update cannot make an old clipboard value appear newest.
-                if self._send_text(text):
-                    self._last_text = text
-                else:
-                    self._last_text = text
+                try:
+                    if self._send_text(text):
+                        self._last_text = text
+                    else:
+                        self._last_text = text
+                except Exception as exc:
+                    log.warning("[CLIPBOARD] Error sending clipboard text: %s", exc)

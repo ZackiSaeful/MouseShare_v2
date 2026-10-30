@@ -118,7 +118,7 @@ class MousehareApp:
         self.settings_section = "General"
         self.local_ip = get_local_ipv4()
         initial_ip = (self.settings.get("client_ip", "") if ROLE == "client"
-                      else self.settings.get("server_host", "") or self.local_ip)
+                      else self.settings.get("server_host", "") or "0.0.0.0")
         self.ip_var = tk.StringVar(value=initial_ip)
         self.port_var = tk.StringVar(value=str(self._current_port()))
         self.token_var = tk.StringVar(value=self._current_token())
@@ -525,7 +525,7 @@ class MousehareApp:
             self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
             self.token_var.set(self.settings["server_token"])
             self.connection_entries = [self.ip_entry, self.port_entry, self.token_entry]
-            tk.Label(details_inner, text="Enter an IPv4 address assigned to this PC, or 0.0.0.0 to use the detected LAN address.",
+            tk.Label(details_inner, text=f"Bind IP: 0.0.0.0 listens on all network adapters. Detected LAN IP: {self.local_ip}",
                      bg=p["panel"], fg=p["muted"], font=("Arial", 9),
                      wraplength=520, justify="left").pack(anchor="w", pady=(0, 8))
         self.show_token_button = ttk.Button(
@@ -1130,7 +1130,7 @@ class MousehareApp:
                     "clipboard_sync": clipboard_sync,
                     "allow_legacy_protocol": bool(self.settings.get("allow_legacy_protocol", False)),
                     "debug": False}
-        host = self.ip_var.get().strip()
+        host = self.ip_var.get().strip() or "0.0.0.0"
         try:
             ipaddress.IPv4Address(host)
         except ipaddress.AddressValueError:
@@ -1150,7 +1150,7 @@ class MousehareApp:
                 "debug": False}
 
     def _copy_connection_details(self) -> None:
-        bind_host = self.ip_var.get().strip()
+        bind_host = self.ip_var.get().strip() or "0.0.0.0"
         try:
             parsed_host = ipaddress.IPv4Address(bind_host)
             port = int(self.port_var.get())
@@ -1159,7 +1159,7 @@ class MousehareApp:
         except (ipaddress.AddressValueError, ValueError):
             messagebox.showerror(
                 "Invalid connection details",
-                "Enter a valid IPv4 bind address and port from 1 to 65535 before copying.",
+                "Enter a valid IPv4 bind address (or 0.0.0.0) and port from 1 to 65535 before copying.",
                 parent=self.root,
             )
             return
@@ -1180,7 +1180,7 @@ class MousehareApp:
         details = f"{connect_host}:{port}\n{token}"
         self.root.clipboard_clear()
         self.root.clipboard_append(details)
-        self._set_status("disconnected", "LAN address, port and pairing key copied.")
+        self._set_status("disconnected", f"LAN address {connect_host}:{port} and pairing key copied.")
 
     def _start_or_retry(self) -> None:
         if self.backend_active:

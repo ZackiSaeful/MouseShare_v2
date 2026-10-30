@@ -29,16 +29,21 @@ try:
     from pynput.keyboard import Controller as KbController, Key, KeyCode
     from pynput.mouse import Button, Controller as MsController
 except ImportError as _e:
-    print(f"[FATAL] Cannot import pynput: {_e}")
-    print("        pip install pynput")
-    sys.exit(1)
+    if sys.platform == "win32":
+        print(f"[FATAL] Cannot import pynput: {_e}")
+        print("        pip install pynput")
+        sys.exit(1)
+    ms = None
+    KbController = Key = KeyCode = Button = MsController = None
 
 try:
     import pystray
     from PIL import Image, ImageDraw
 except ImportError as _e:
-    print(f"[FATAL] Cannot import pystray/Pillow: {_e}")
-    sys.exit(1)
+    if sys.platform == "win32":
+        print(f"[FATAL] Cannot import pystray/Pillow: {_e}")
+        sys.exit(1)
+    pystray = Image = ImageDraw = None
 
 try:
     from .protocol import recv_message, send_message
@@ -87,6 +92,7 @@ class WinState:
         self.client_sock = None    # current Mac TCP socket
         self.client_channel = None # authenticated encrypted stream
         self.clipboard_sync_enabled = False
+        self.injecting   = False   # True while injecting a mouse movement
 
 
 STATE  = WinState()
@@ -106,8 +112,8 @@ def _notify_status(status: str, message: str = "") -> None:
 
 # ── Input controllers ──────────────────────────────────────────────────────────
 
-_kb = KbController()
-_ms = MsController()
+_kb = KbController() if KbController is not None else None
+_ms = MsController() if MsController is not None else None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -122,44 +128,47 @@ _ms = MsController()
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SPECIAL_KEY_MAP: dict[str, object] = {
-    "enter":       Key.enter,
-    "space":       Key.space,
-    "tab":         Key.tab,
-    "backspace":   Key.backspace,
-    "delete":      Key.delete,
-    "escape":      Key.esc,
+    "enter":       getattr(Key, "enter", None),
+    "space":       getattr(Key, "space", None),
+    "tab":         getattr(Key, "tab", None),
+    "backspace":   getattr(Key, "backspace", None),
+    "delete":      getattr(Key, "delete", None),
+    "escape":      getattr(Key, "esc", None),
     # Modifiers -- note: cmd -> ctrl (Command mapping)
-    "shift":       Key.shift,
-    "ctrl":        Key.ctrl,
-    "alt":         Key.alt,
-    "cmd":         Key.ctrl,      # Mac Command -> Windows Ctrl
-    "caps_lock":   Key.caps_lock,
+    "shift":       getattr(Key, "shift", None),
+    "ctrl":        getattr(Key, "ctrl", None),
+    "alt":         getattr(Key, "alt", None),
+    "cmd":         getattr(Key, "ctrl", None),      # Mac Command -> Windows Ctrl
+    "caps_lock":   getattr(Key, "caps_lock", None),
     # Arrow keys
-    "left":        Key.left,
-    "right":       Key.right,
-    "up":          Key.up,
-    "down":        Key.down,
+    "left":        getattr(Key, "left", None),
+    "right":       getattr(Key, "right", None),
+    "up":          getattr(Key, "up", None),
+    "down":        getattr(Key, "down", None),
     # Navigation
-    "home":        Key.home,
-    "end":         Key.end,
-    "page_up":     Key.page_up,
-    "page_down":   Key.page_down,
-    "insert":      Key.insert,
+    "home":        getattr(Key, "home", None),
+    "end":         getattr(Key, "end", None),
+    "page_up":     getattr(Key, "page_up", None),
+    "page_down":   getattr(Key, "page_down", None),
+    "insert":      getattr(Key, "insert", None),
     # Misc
-    "num_lock":    Key.num_lock,
-    "print_screen":Key.print_screen,
-    "scroll_lock": Key.scroll_lock,
-    "pause":       Key.pause,
+    "num_lock":    getattr(Key, "num_lock", None),
+    "print_screen":getattr(Key, "print_screen", None),
+    "scroll_lock": getattr(Key, "scroll_lock", None),
+    "pause":       getattr(Key, "pause", None),
     # Function keys
-    "f1":  Key.f1,  "f2":  Key.f2,  "f3":  Key.f3,  "f4":  Key.f4,
-    "f5":  Key.f5,  "f6":  Key.f6,  "f7":  Key.f7,  "f8":  Key.f8,
-    "f9":  Key.f9,  "f10": Key.f10, "f11": Key.f11, "f12": Key.f12,
+    "f1":  getattr(Key, "f1", None),  "f2":  getattr(Key, "f2", None),
+    "f3":  getattr(Key, "f3", None),  "f4":  getattr(Key, "f4", None),
+    "f5":  getattr(Key, "f5", None),  "f6":  getattr(Key, "f6", None),
+    "f7":  getattr(Key, "f7", None),  "f8":  getattr(Key, "f8", None),
+    "f9":  getattr(Key, "f9", None),  "f10": getattr(Key, "f10", None),
+    "f11": getattr(Key, "f11", None), "f12": getattr(Key, "f12", None),
 }
 
-MOUSE_BUTTON_MAP: dict[str, Button] = {
-    "left":   Button.left,
-    "right":  Button.right,
-    "middle": Button.middle,
+MOUSE_BUTTON_MAP: dict[str, object] = {
+    "left":   getattr(Button, "left", None),
+    "right":  getattr(Button, "right", None),
+    "middle": getattr(Button, "middle", None),
 }
 
 
@@ -279,6 +288,7 @@ def _apply_remote_clipboard(msg: dict) -> None:
 
 _edge_sent = False
 _edge_lock = threading.Lock()
+_last_activation_time: float = 0.0
 
 _LLMHF_INJECTED = 0x00000001
 _LLMHF_LOWER_IL_INJECTED = 0x00000002
@@ -391,7 +401,7 @@ def _entry_point(edge: str, fraction: float,
     low = rect_top if vertical_axis else rect_left
     high = (rect_bottom if vertical_axis else rect_right) - 1
     along = min(max(along, low), high)
-    inset = max(6, int(CONFIG.get("edge_threshold", 3)) * 2 + 2)
+    inset = max(14, int(CONFIG.get("edge_threshold", 3)) * 3 + 4)
     if edge == "left":
         x = rect_left + min(inset, max(0, rect_right - rect_left - 1))
         y = along
@@ -422,15 +432,21 @@ def _on_mouse_move(x: int, y: int) -> None:
     The _edge_sent flag prevents sending the edge notification more than once
     per crossing (debounce). It resets when the cursor moves away from the edge
     or when WINDOWS_ACTIVE starts again."""
-    global _edge_sent
+    global _edge_sent, _last_activation_time
 
     with STATE.lock:
         active = STATE.active
+        injecting = getattr(STATE, "injecting", False)
 
-    if not active:
+    if not active or injecting:
         # Reset debounce when not active, so the next activation works cleanly
-        with _edge_lock:
-            _edge_sent = False
+        if not active:
+            with _edge_lock:
+                _edge_sent = False
+        return
+
+    # Grace period: do not trigger edge return within 0.35s of activation
+    if time.monotonic() - _last_activation_time < 0.35:
         return
 
     threshold = int(CONFIG.get("edge_threshold", 3))
@@ -501,9 +517,10 @@ def _place_cursor_at_peer_edge(edge: str, fraction: float) -> float | None:
 
 def _handle_activate_windows(msg: dict) -> None:
     """Mac is sending input to Windows now."""
-    global _edge_sent
+    global _edge_sent, _last_activation_time
     with _edge_lock:
         _edge_sent = False   # fresh start -- reset debounce
+        _last_activation_time = time.monotonic()
     position = _normalized_position(msg.get("position"))
     if position is None:
         position = 0.5
@@ -751,43 +768,45 @@ def _serve_client_limited(conn: socket.socket, addr) -> None:
         _client_slots.release()
 
 
+def _get_local_ip() -> str:
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("192.0.2.1", 1))
+        ip = probe.getsockname()[0]
+        return ip if not ip.startswith("127.") else "127.0.0.1"
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        probe.close()
+
+
 def _run_server() -> None:
     global _server_socket
-    host = CONFIG.get("host", "0.0.0.0")
-    if host in ("", "0.0.0.0"):
-        # Keep legacy configurations that requested all interfaces scoped to
-        # the active LAN route instead of exposing Mousehare on every adapter.
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            probe.connect(("192.0.2.1", 1))
-            host = probe.getsockname()[0]
-            if host.startswith("127."):
-                host = "127.0.0.1"
-        except OSError:
-            host = "127.0.0.1"
-        finally:
-            probe.close()
+    raw_host = CONFIG.get("host", "0.0.0.0")
+    # Bind to 0.0.0.0 so all interfaces (Wi-Fi, Ethernet, LAN) accept connections.
+    bind_host = "0.0.0.0" if raw_host in ("", "0.0.0.0") else raw_host
+    display_host = _get_local_ip() if bind_host == "0.0.0.0" else bind_host
     port = CONFIG["port"]
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        srv.bind((host, port))
+        srv.bind((bind_host, port))
     except OSError as exc:
-        log.error("[FATAL] Cannot bind %s:%d -- %s", host, port, exc)
+        log.error("[FATAL] Cannot bind %s:%d -- %s", bind_host, port, exc)
         _server_stop.set()
         _stop_mouse_listener()
-        _notify_status("error", f"Cannot listen on {host}:{port}: {exc}")
+        _notify_status("error", f"Cannot listen on {bind_host}:{port}: {exc}")
         srv.close()
         return
 
     srv.listen(1)
     srv.settimeout(1.0)   # allows checking _server_stop periodically
     _server_socket = srv
-    log.info("[NETWORK] Listening on %s:%d", host, port)
+    log.info("[NETWORK] Listening on %s:%d (LAN IP: %s)", bind_host, port, display_host)
     _notify_status(
         "disconnected",
-        f"Listening on {host}:{port}. Secure protocol v{PROTOCOL_VERSION}; waiting for a client.",
+        f"Listening on {display_host}:{port}. Secure protocol v{PROTOCOL_VERSION}; waiting for a client.",
     )
 
     while not _server_stop.is_set():

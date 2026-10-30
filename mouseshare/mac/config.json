@@ -3,5 +3,6 @@
     "port": 5555,
     "token": "CHANGE_ME",
     "edge_threshold": 3,
+    "clipboard_sync": true,
     "debug": true
 }

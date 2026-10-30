@@ -85,8 +85,8 @@ def get_local_ipv4() -> str:
 def default_settings() -> dict:
     return {
         "client_ip": "",
-        "server_host": "",
         "client_port": PORT_DEFAULT,
+        "server_host": "",
         "server_port": PORT_DEFAULT,
         "client_token": "",
         "server_token": secrets.token_urlsafe(16),
@@ -94,7 +94,7 @@ def default_settings() -> dict:
         "mac_position": "left",
         "theme": "TVA",
         "local_discovery": False,
-        "clipboard_sync": False,
+        "clipboard_sync": True,
         "allow_legacy_protocol": False,
         "debug": False,
     }
@@ -115,7 +115,7 @@ class MousehareApp:
         self.settings_section = "General"
         self.local_ip = get_local_ipv4()
         initial_ip = (self.settings.get("client_ip", "") if ROLE == "client"
-                      else self.settings.get("server_host") or self.local_ip)
+                      else self.settings.get("server_host", "") or self.local_ip)
         self.ip_var = tk.StringVar(value=initial_ip)
         self.port_var = tk.StringVar(value=str(self._current_port()))
         self.token_var = tk.StringVar(value=self._current_token())
@@ -123,6 +123,10 @@ class MousehareApp:
             value=self.settings.get("mac_position", "left"))
         self.status_var = tk.StringVar(value="Disconnected · Ready to start")
         self.show_token = tk.BooleanVar(value=False)
+        self.clipboard_sync_var = tk.BooleanVar(
+            value=bool(self.settings.get("clipboard_sync", True)))
+        self.clipboard_toggle = None
+        self.connection_entries = []
         self.mac_position_selector = None
         self.network_mac_position_selector = None
         self.mac_position_hint = None
@@ -493,43 +497,36 @@ class MousehareApp:
                      font=("Arial", 9)).grid(row=0, column=1, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Pairing Key", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
-            self._entry(fields, self.ip_var).grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self._entry(fields, self.port_var, width=8).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self.token_entry = self._entry(fields, self.token_var, show="\u2022")
+            self.ip_entry = self._entry(fields, self.ip_var)
+            self.ip_entry.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
+            self.port_entry = self._entry(fields, self.port_var, width=8)
+            self.port_entry.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
+            self.token_entry = self._entry(fields, self.token_var, show="*")
             self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
+            self.connection_entries = [self.ip_entry, self.port_entry, self.token_entry]
         else:
-            self.ip_var.set(self.settings.get("server_host") or self.local_ip)
             tk.Label(fields, text="Bind IP", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=0, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Port", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=1, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Pairing Key", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
-            self._entry(fields, self.ip_var).grid(
-                row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8
-            )
-            self._entry(fields, self.port_var, width=8).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self.token_entry = self._entry(fields, self.token_var, show="*", state="readonly")
+            self.ip_entry = self._entry(fields, self.ip_var)
+            self.ip_entry.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
+            self.port_entry = self._entry(fields, self.port_var, width=8)
+            self.port_entry.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
+            self.token_entry = self._entry(fields, self.token_var, show="*")
             self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
             self.token_var.set(self.settings["server_token"])
-        token_actions = tk.Frame(fields, bg=p["panel"])
-        token_actions.grid(row=2, column=2, sticky="e", pady=(5, 0))
-        self.show_token_button = tk.Button(
-            token_actions, text="Show", command=self._toggle_token_visibility,
-            relief="flat", bd=0, bg=p["panel2"], fg=p["text"],
-            activebackground=p["accent_hi"], activeforeground="#18130F",
-            padx=10, pady=4, cursor="hand2", font=("Arial", 8, "bold"),
+            self.connection_entries = [self.ip_entry, self.port_entry, self.token_entry]
+            tk.Label(details_inner, text="Enter an IPv4 address assigned to this PC, or 0.0.0.0 to use the detected LAN address.",
+                     bg=p["panel"], fg=p["muted"], font=("Arial", 9),
+                     wraplength=520, justify="left").pack(anchor="w", pady=(0, 8))
+        self.show_token_button = ttk.Button(
+            fields, text="👁", command=self._toggle_token_visibility,
+            style="Mousehare.Small.TButton", cursor="hand2", width=3,
         )
-        self.show_token_button.pack(side="left", padx=(0, 6))
-        clipboard_label = "Paste" if ROLE == "client" else "Copy"
-        clipboard_command = self._paste_pairing_key if ROLE == "client" else self._copy_pairing_key
-        self.clipboard_token_button = tk.Button(
-            token_actions, text=clipboard_label, command=clipboard_command,
-            relief="flat", bd=0, bg=p["panel2"], fg=p["text"],
-            activebackground=p["accent_hi"], activeforeground="#18130F",
-            padx=10, pady=4, cursor="hand2", font=("Arial", 8, "bold"),
-        )
-        self.clipboard_token_button.pack(side="left")
+        self.show_token_button.grid(row=2, column=2, sticky="e", pady=(5, 0))
 
         if ROLE == "client":
             pairing_actions = tk.Frame(details_inner, bg=p["panel"])
@@ -560,6 +557,20 @@ class MousehareApp:
                 bg=p["panel"], fg=p["muted"], font=("Arial", 9),
                 wraplength=520, justify="left")
             self.mac_position_hint.pack(anchor="w", pady=(0, 10))
+
+        clipboard_frame = tk.Frame(details_inner, bg=p["panel"])
+        clipboard_frame.pack(fill="x", pady=(0, 12))
+        self.clipboard_toggle = tk.Checkbutton(
+            clipboard_frame,
+            text="Share clipboard (Copy / Paste / Cut across screens)",
+            variable=self.clipboard_sync_var,
+            command=self._on_clipboard_toggle,
+            bg=p["panel"], fg=p["text"],
+            selectcolor=p["field"], activebackground=p["panel"],
+            activeforeground=p["text"], disabledforeground=p["disabled"],
+            font=("Arial", 9),
+        )
+        self.clipboard_toggle.pack(side="left")
 
         controls = tk.Frame(details_inner, bg=p["panel"])
         controls.pack(fill="x")
@@ -901,6 +912,10 @@ class MousehareApp:
             return
         self._set_status("disconnected", "A new pairing key was generated.")
 
+    def _on_clipboard_toggle(self) -> None:
+        self.settings["clipboard_sync"] = bool(self.clipboard_sync_var.get())
+        self._save_settings()
+
     def _save_clipboard_preference(self) -> None:
         if self.backend_active:
             messagebox.showwarning(
@@ -1005,10 +1020,10 @@ class MousehareApp:
     def _refresh_token_visibility(self) -> None:
         token_entry = getattr(self, "token_entry", None)
         if token_entry is not None:
-            token_entry.configure(show="" if self.show_token.get() else "\u2022")
+            token_entry.configure(show="" if self.show_token.get() else "*")
         show_button = getattr(self, "show_token_button", None)
         if show_button is not None:
-            show_button.configure(text="Hide" if self.show_token.get() else "Show")
+            show_button.configure(text="🙈" if self.show_token.get() else "👁")
 
     def _toggle_token_visibility(self) -> None:
         self.show_token.set(not self.show_token.get())
@@ -1089,6 +1104,8 @@ class MousehareApp:
         except ValueError:
             messagebox.showerror("Invalid port", "Enter a port from 1 to 65535.", parent=self.root)
             return None
+        clipboard_sync = bool(getattr(self, "clipboard_sync_var", None) and self.clipboard_sync_var.get())
+        self.settings["clipboard_sync"] = clipboard_sync
         if ROLE == "client":
             host = self.ip_var.get().strip()
             try:
@@ -1102,7 +1119,7 @@ class MousehareApp:
             return {"windows_host": host, "port": port, "token": token,
                     "edge_threshold": int(self.settings.get("edge_threshold", 3)),
                     "mac_position": self.settings.get("mac_position", "left"),
-                    "clipboard_sync": bool(self.settings.get("clipboard_sync", False)),
+                    "clipboard_sync": clipboard_sync,
                     "allow_legacy_protocol": bool(self.settings.get("allow_legacy_protocol", False)),
                     "debug": False}
         host = self.ip_var.get().strip()
@@ -1110,7 +1127,8 @@ class MousehareApp:
             ipaddress.IPv4Address(host)
         except ipaddress.AddressValueError:
             messagebox.showerror(
-                "Invalid address", "Enter a valid IPv4 address for the Windows server.",
+                "Invalid bind address",
+                "Enter a valid IPv4 address assigned to this PC, or 0.0.0.0.",
                 parent=self.root,
             )
             return None
@@ -1120,62 +1138,41 @@ class MousehareApp:
         return {"host": host, "port": port, "token": token,
                 "edge_threshold": int(self.settings.get("edge_threshold", 3)),
                 "mac_position": self.settings.get("mac_position", "left"),
-                "clipboard_sync": bool(self.settings.get("clipboard_sync", False)),
+                "clipboard_sync": clipboard_sync,
                 "debug": False}
 
     def _copy_connection_details(self) -> None:
-        host = self.ip_var.get().strip()
+        bind_host = self.ip_var.get().strip()
         try:
-            selected = ipaddress.IPv4Address(host)
-        except ipaddress.AddressValueError:
-            selected = None
-        advertised_host = self.local_ip if selected is None or selected.is_unspecified else host
-        details = f"{advertised_host}:{self.port_var.get()}\n{self.token_var.get()}"
-        self.root.clipboard_clear()
-        self.root.clipboard_append(details)
-        self._set_status("disconnected", "LAN address, port and pairing key copied.")
-
-    def _copy_pairing_key(self) -> None:
-        self.root.clipboard_clear()
-        self.root.clipboard_append(self.token_var.get())
-        self.root.update_idletasks()
-        self._set_status("disconnected", "Pairing key copied to clipboard.")
-
-    def _paste_pairing_key(self) -> None:
-        try:
-            clipboard_text = self.root.clipboard_get().strip()
-        except tk.TclError:
-            clipboard_text = ""
-
-        lines = [line.strip() for line in clipboard_text.splitlines() if line.strip()]
-        if not lines:
-            messagebox.showwarning(
-                "Clipboard is empty", "Copy the pairing key on the Windows computer first.",
+            parsed_host = ipaddress.IPv4Address(bind_host)
+            port = int(self.port_var.get())
+            if not 1 <= port <= 65535:
+                raise ValueError
+        except (ipaddress.AddressValueError, ValueError):
+            messagebox.showerror(
+                "Invalid connection details",
+                "Enter a valid IPv4 bind address and port from 1 to 65535 before copying.",
                 parent=self.root,
             )
             return
-
-        key = lines[-1]
-        details_pasted = False
-        if len(lines) == 2:
-            host, separator, port_text = lines[0].rpartition(":")
-            if separator:
-                try:
-                    ipaddress.IPv4Address(host)
-                    port = int(port_text)
-                    if not 1 <= port <= 65535:
-                        raise ValueError
-                except (ipaddress.AddressValueError, ValueError):
-                    pass
-                else:
-                    self.ip_var.set(host)
-                    self.port_var.set(str(port))
-                    details_pasted = True
-
-        self.token_var.set(key)
-        status = "Connection details and pairing key pasted." if details_pasted else \
-                 "Pairing key pasted from clipboard."
-        self._set_status("disconnected", status)
+        token = self.token_var.get().strip()
+        if not token:
+            messagebox.showerror(
+                "Pairing key required",
+                "Enter a pairing key before copying the connection details.",
+                parent=self.root,
+            )
+            return
+        self.settings["server_host"] = bind_host
+        self.settings["server_port"] = port
+        self.settings["server_token"] = token
+        if not self._save_settings():
+            return
+        connect_host = self.local_ip if parsed_host.is_unspecified else str(parsed_host)
+        details = f"{connect_host}:{port}\n{token}"
+        self.root.clipboard_clear()
+        self.root.clipboard_append(details)
+        self._set_status("disconnected", "LAN address, port and pairing key copied.")
 
     def _start_or_retry(self) -> None:
         if self.backend_active:
@@ -1245,6 +1242,14 @@ class MousehareApp:
                          self.network_mac_position_selector):
             if selector is not None and selector.winfo_exists():
                 selector.configure(state=position_state)
+        entry_state = ("disabled" if self.backend_active
+                       and self.connection_status != "error" else "normal")
+        for entry in self.connection_entries:
+            if entry.winfo_exists():
+                entry.configure(state=entry_state)
+        toggle = getattr(self, "clipboard_toggle", None)
+        if toggle is not None and toggle.winfo_exists():
+            toggle.configure(state="disabled" if self.backend_active else "normal")
         if primary is None or not primary.winfo_exists():
             return
         idle_label = "Connect" if ROLE == "client" else "Start Server"

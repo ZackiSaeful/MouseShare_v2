@@ -563,15 +563,7 @@ def _handle_key(msg: dict) -> None:
 
 
 def _handle_mouse_move(msg: dict) -> None:
-<<<<<<< HEAD
     """Inject a relative mouse movement only while Windows owns control."""
-=======
-    """Inject a relative mouse movement.
-
-    Uses native win32 mouse_event for hardware-accelerated, sub-millisecond
-    smooth motion, falling back to pynput. Controller if unavailable.
-    """
->>>>>>> 9e0693ddaadd3be9e2a4a69d68c6bd2515d73b7f
     dx, dy = msg.get("dx"), msg.get("dy")
     if type(dx) is not int or type(dy) is not int or abs(dx) > 10000 or abs(dy) > 10000:
         return
@@ -583,12 +575,9 @@ def _handle_mouse_move(msg: dict) -> None:
         active = STATE.active
     if not active:
         return
+    with STATE.lock:
+        STATE.injecting = True
     try:
-<<<<<<< HEAD
-        _ms.move(dx, dy)
-    except Exception as exc:
-        log.error("[MOUSE] Move injection error: %s", exc)
-=======
         if sys.platform == "win32":
             # 0x0001 = MOUSEEVENTF_MOVE (relative mouse movement)
             ctypes.windll.user32.mouse_event(0x0001, dx, dy, 0, 0)
@@ -602,7 +591,6 @@ def _handle_mouse_move(msg: dict) -> None:
     finally:
         with STATE.lock:
             STATE.injecting = False
->>>>>>> 9e0693ddaadd3be9e2a4a69d68c6bd2515d73b7f
 
 
 def _handle_mouse_click(msg: dict) -> None:

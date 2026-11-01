@@ -97,6 +97,8 @@ def default_settings() -> dict:
         "theme": "TVA",
         "local_discovery": False,
         "clipboard_sync": False,
+        "audio_share": False,
+        "audio_gain": 100,
         "allow_legacy_protocol": False,
         "debug": False,
     }
@@ -975,6 +977,49 @@ class MousehareApp:
                 wrap, text="Mousehare's existing TCP protocol uses port 5555 by default.",
                 bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
             )).pack(anchor="w", pady=(14, 0))
+
+            # Audio sharing compact controls
+            tk.Label(wrap, text="Audio sharing", bg=p["panel"], fg=p["text"],
+                     font=("Arial", 12, "bold")).pack(anchor="w", pady=(22, 6))
+            self.audio_share_var = tk.BooleanVar(
+                value=bool(self.settings.get("audio_share", False))
+            )
+            audio_text = ("Share Windows system audio with Mac" if ROLE == "server"
+                          else "Receive Windows system audio on Mac")
+            audio_toggle = tk.Checkbutton(
+                wrap, text=audio_text,
+                variable=self.audio_share_var, bg=p["panel"], fg=p["text"],
+                selectcolor=p["field"], activebackground=p["panel"],
+                activeforeground=p["text"], disabledforeground=p["disabled"],
+                font=("Arial", 10), justify="left", anchor="w",
+                command=self._on_audio_share_toggled,
+            )
+            audio_toggle.pack(anchor="w", pady=(0, 4))
+            self._settings_wrap_label(audio_toggle, pad=48)
+
+            desc = ("Streams Windows system output mix to the paired Mac client over the authenticated, "
+                    "encrypted connection (WASAPI loopback). Off by default. Requires both computers to enable "
+                    "audio sharing. Captures system output only; microphone audio is never captured."
+                    if ROLE == "server" else
+                    "Receives Windows system audio stream over the authenticated, encrypted connection. "
+                    "Off by default. Both computers must enable audio sharing.")
+            self._settings_wrap_label(tk.Label(
+                wrap, text=desc,
+                bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left",
+            )).pack(anchor="w", pady=(0, 8))
+
+            if ROLE == "client":
+                tk.Label(wrap, text="Windows audio stream volume (0-100)", bg=p["panel"],
+                         fg=p["muted"], font=("Arial", 10)).pack(anchor="w", pady=(6, 2))
+                self.audio_gain_var = tk.IntVar(value=int(self.settings.get("audio_gain", 100)))
+                gain_scale = tk.Scale(
+                    wrap, from_=0, to=100, orient="horizontal",
+                    variable=self.audio_gain_var, bg=p["panel"], fg=p["text"],
+                    troughcolor=p["field"], highlightthickness=0,
+                    activebackground=p["accent_hi"], length=240,
+                    command=lambda val: self._on_audio_gain_changed(val),
+                )
+                gain_scale.pack(anchor="w", pady=(0, 6))
         elif self.settings_section == "Network":
             self._settings_wrap_label(tk.Label(
                 wrap, text="Manual IP and port configuration stays available on every build.",
@@ -1098,6 +1143,25 @@ class MousehareApp:
                 bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
             )).pack(anchor="w")
 
+    def _on_audio_share_toggled(self) -> None:
+        enabled = bool(self.audio_share_var.get())
+        self.settings["audio_share"] = enabled
+        self._save_settings()
+        if hasattr(agent, "set_audio_share_enabled"):
+            agent.set_audio_share_enabled(enabled)
+        state_str = "enabled" if enabled else "disabled"
+        self._set_status(self.connection_status, f"Audio sharing {state_str}.")
+
+    def _on_audio_gain_changed(self, val) -> None:
+        try:
+            gain = int(val)
+        except ValueError:
+            return
+        self.settings["audio_gain"] = max(0, min(100, gain))
+        self._save_settings()
+        if hasattr(agent, "set_audio_gain"):
+            agent.set_audio_gain(gain)
+
     def _save_general_settings(self) -> None:
         try:
             port = int(self.settings_port_var.get())
@@ -1109,6 +1173,8 @@ class MousehareApp:
         key = "client_port" if ROLE == "client" else "server_port"
         self.settings[key] = port
         self.port_var.set(str(port))
+        if hasattr(self, "audio_share_var"):
+            self.settings["audio_share"] = bool(self.audio_share_var.get())
         if not self._save_settings():
             return
         self._set_status("disconnected", f"Default port saved: {port}.")
@@ -1386,6 +1452,8 @@ class MousehareApp:
                     "edge_threshold": int(self.settings.get("edge_threshold", 3)),
                     "mac_position": self.settings.get("mac_position", "left"),
                     "clipboard_sync": bool(self.settings.get("clipboard_sync", False)),
+                    "audio_share": bool(self.settings.get("audio_share", False)),
+                    "audio_gain": int(self.settings.get("audio_gain", 100)),
                     "allow_legacy_protocol": bool(self.settings.get("allow_legacy_protocol", False)),
                     "debug": False}
         host = self.ip_var.get().strip()
@@ -1404,6 +1472,7 @@ class MousehareApp:
                 "edge_threshold": int(self.settings.get("edge_threshold", 3)),
                 "mac_position": self.settings.get("mac_position", "left"),
                 "clipboard_sync": bool(self.settings.get("clipboard_sync", False)),
+                "audio_share": bool(self.settings.get("audio_share", False)),
                 "debug": False}
 
     def _copy_connection_details(self) -> None:

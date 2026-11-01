@@ -12,3 +12,4 @@ cffi==2.1.1
 cryptography==50.0.2
 pycparser==3.12
 six==1.17.0
+pyaudiowpatch==0.2.12.9

@@ -12,7 +12,7 @@ if (-not (Test-Path $PythonExe)) {
 & $PythonExe scripts/make_icons.py --platform windows
 & $PythonExe -m PyInstaller --noconfirm --clean --windowed --onedir `
     --name Mousehare --icon (Join-Path $Root ".build\icons\mouseshare.ico") --specpath (Join-Path $Root ".build\spec") `
-    --paths $Root --collect-all pystray --collect-all cryptography mouseshare_app.py
+    --paths $Root --collect-all pystray --collect-all cryptography --collect-all pyaudiowpatch mouseshare_app.py
 
 $IsccPath = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
 if (-not $IsccPath) {
@@ -20,6 +20,7 @@ if (-not $IsccPath) {
     $ProgramFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
     if ($ProgramFilesX86) { $InnoCandidates += (Join-Path $ProgramFilesX86 "Inno Setup 6\ISCC.exe") }
     if ($env:ProgramFiles) { $InnoCandidates += (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe") }
+    if ($env:LOCALAPPDATA) { $InnoCandidates += (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe") }
     foreach ($Candidate in $InnoCandidates) {
         if (Test-Path $Candidate) { $IsccPath = $Candidate; break }
     }

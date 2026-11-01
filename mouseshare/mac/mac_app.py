@@ -30,12 +30,9 @@ try:
         CGDisplayBounds,
         CGDisplayHideCursor,
         CGDisplayShowCursor,
-        CGEventCreateMouseEvent,
         CGEventGetFlags,
         CGEventGetIntegerValueField,
         CGEventGetLocation,
-        CGEventPost,
-        CGEventSetIntegerValueField,
         CGEventMaskBit,
         CGEventTapCreate,
         CGEventTapEnable,
@@ -64,16 +61,11 @@ try:
         kCGEventRightMouseDragged,
         kCGEventRightMouseUp,
         kCGEventScrollWheel,
-        kCGEventSourceUserData,
         kCGEventTapOptionDefault,
         kCGEventTapDisabledByTimeout,
         kCGEventTapDisabledByUserInput,
         kCGHeadInsertEventTap,
-        kCGHIDEventTap,
         kCGKeyboardEventKeycode,
-        kCGMouseButtonCenter,
-        kCGMouseButtonLeft,
-        kCGMouseButtonRight,
         kCGMouseEventDeltaX,
         kCGMouseEventDeltaY,
         kCGScrollWheelEventDeltaAxis1,
@@ -105,11 +97,13 @@ try:
     from ..secure_transport import HandshakeError, LegacyChannel, client_handshake, opposite_edge
     from ..input_coalescer import OrderedInputQueue
     from ..clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
+    from ..audio_playback import AudioPlayback
 except ImportError:  # Direct legacy execution: python mac_app.py
     from protocol import recv_message, send_message
     from mouseshare.secure_transport import HandshakeError, LegacyChannel, client_handshake, opposite_edge
     from mouseshare.input_coalescer import OrderedInputQueue
     from mouseshare.clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
+    from mouseshare.audio_playback import AudioPlayback
 
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -394,9 +388,6 @@ _last_edge_coord: int = 500
 # waiting for the async thread to call _dissociate_mouse() / _hide_cursor().
 _switching_to_win: bool = False
 _switching_to_mac: bool = False
-_held_mouse_buttons: set[str] = set()
-_held_mouse_lock = threading.Lock()
-_HANDOFF_RELEASE_MARKER = 0x4D534852
 
 
 def _main_display_geometry() -> tuple[float, float, float, float]:
@@ -438,30 +429,6 @@ def _associate_mouse() -> None:
         CGAssociateMouseAndMouseCursorPosition(True)
         STATE._dissoc = False
         log.debug("[CURSOR] Mouse re-associated with cursor")
-
-
-def _release_mac_mouse_buttons() -> None:
-    """End any local drag before transferring the pointer to Windows."""
-    button_specs = {
-        "left": (kCGEventLeftMouseUp, kCGMouseButtonLeft),
-        "right": (kCGEventRightMouseUp, kCGMouseButtonRight),
-        "middle": (kCGEventOtherMouseUp, kCGMouseButtonCenter),
-    }
-    with _held_mouse_lock:
-        held = set(_held_mouse_buttons)
-        _held_mouse_buttons.clear()
-    current_event = Quartz.CGEventCreate(None)
-    if current_event is None:
-        return
-    point = CGEventGetLocation(current_event)
-    for name in held:
-        event_type, button = button_specs[name]
-        event = CGEventCreateMouseEvent(None, event_type, point, button)
-        if event is not None:
-            CGEventSetIntegerValueField(event, kCGEventSourceUserData,
-                                        _HANDOFF_RELEASE_MARKER)
-            CGEventPost(kCGHIDEventTap, event)
-            log.info("[INPUT] Released local %s mouse button for Windows handoff", name)
 
 
 def restore_mac_safe() -> None:
@@ -580,6 +547,41 @@ def _start_clipboard_sync() -> None:
     log.info("[CLIPBOARD] Plain-text sync started (48 KiB maximum)")
 
 
+_audio_playback: AudioPlayback | None = None
+
+
+def _sync_audio_state() -> None:
+    global _audio_playback
+    with STATE._lock:
+        sock = STATE._sock
+        channel = STATE._channel
+    is_secure = channel is not None and getattr(channel, "is_encrypted", False)
+    enabled = bool(CONFIG.get("audio_share", False)) and is_secure
+    if enabled:
+        if _audio_playback is None:
+            _audio_playback = AudioPlayback(CONFIG.get("audio_gain", 100))
+        if not _audio_playback.is_running:
+            _audio_playback.start()
+        if sock and channel:
+            channel.send(sock, {"type": "audio_control", "enabled": True}, send_message)
+    else:
+        if _audio_playback is not None and _audio_playback.is_running:
+            _audio_playback.stop()
+        if sock and channel and getattr(channel, "is_encrypted", False):
+            channel.send(sock, {"type": "audio_control", "enabled": False}, send_message)
+
+
+def set_audio_share_enabled(enabled: bool) -> None:
+    CONFIG["audio_share"] = bool(enabled)
+    _sync_audio_state()
+
+
+def set_audio_gain(gain: int) -> None:
+    CONFIG["audio_gain"] = max(0, min(100, int(gain)))
+    if _audio_playback is not None:
+        _audio_playback.set_gain(CONFIG["audio_gain"])
+
+
 def _stop_clipboard_sync() -> None:
     global _clipboard_sync
     with _clipboard_sync_lock:
@@ -618,11 +620,6 @@ def switch_to_windows() -> None:
 
         mac_exit_edge = opposite_edge(CONFIG.get("mac_position", "left"))
         log.info("[EDGE] Mac %s edge -- switching to Windows", mac_exit_edge)
-
-        # A local app may still own a Finder/form drag. It never receives the
-        # physical mouse-up after the handoff, so release it before suppressing
-        # the rest of the gesture on Mac.
-        _release_mac_mouse_buttons()
 
         # Step 1: queue activation before accepting movement input.  The same
         # ordered worker forwards later deltas, so Windows always activates
@@ -717,25 +714,16 @@ def _handle_event(proxy, event_type: int, event, refcon):
     Return *event* to pass through, or *None* to suppress from Mac apps."""
     global _prev_flags, _last_edge_coord, _switching_to_win
 
-    win = STATE.is_windows_active   # read once per event (atomic)
-    switching = _switching_to_win or _switching_to_mac
-
-    # Let our synthetic mouse-up reach the local app even though this handoff
-    # has already started suppressing physical mouse events.
-    if int(CGEventGetIntegerValueField(event, kCGEventSourceUserData)) == _HANDOFF_RELEASE_MARKER:
-        return event
-
     if event_type in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
         # macOS can disable a tap after a timeout. Re-enable it immediately so
         # captured input does not start leaking to local applications.
         if _event_tap_ref is not None:
             log.warning("[EVENT TAP] macOS disabled the tap (type=%s); re-enabling", event_type)
             CGEventTapEnable(_event_tap_ref, True)
-        # The event that reports a disabled tap is still delivered to us.
-        # Do not pass it to macOS while Windows owns the pointer, or that one
-        # event can make the local cursor appear/move alongside Windows.
-        return None if win or switching else event
+        return event
 
+    win = STATE.is_windows_active   # read once per event (atomic)
+    switching = _switching_to_win or _switching_to_mac
     if _switching_to_mac:
         # Do not enqueue events after deactivate_windows in the ordered queue.
         return None
@@ -835,12 +823,6 @@ def _handle_event(proxy, event_type: int, event, refcon):
             }):
                 threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None
-        if not switching:
-            with _held_mouse_lock:
-                if pressed:
-                    _held_mouse_buttons.add(btn)
-                else:
-                    _held_mouse_buttons.discard(btn)
         return None if switching else event
 
     # ── Scroll wheel ──────────────────────────────────────────────────────────
@@ -1028,6 +1010,10 @@ def _handle_incoming(msg: dict) -> None:
     elif msg_type == "clipboard":
         _apply_remote_clipboard(msg)
 
+    elif msg_type == "audio_pcm":
+        if _audio_playback is not None and _audio_playback.is_running:
+            _audio_playback.feed_frame(msg.get("pcm", ""))
+
     elif msg_type == "hello_error":
         log.error("[NETWORK] The Windows server rejected pairing.")
         _stop_clipboard_sync()
@@ -1098,6 +1084,7 @@ def _connect_loop(generation: int | None = None) -> None:
             STATE.set_connected(s, channel, clipboard_enabled)
             if clipboard_enabled:
                 _start_clipboard_sync()
+            _sync_audio_state()
 
             # Run the receive loop and wait until it exits (connection lost)
             recv_t = threading.Thread(
@@ -1140,6 +1127,8 @@ def _do_quit(icon=None, _item=None) -> None:
     _stop_event_tap()
     restore_mac_safe()   # cursor MUST be shown/associated before exit
     _stop_clipboard_sync()
+    if _audio_playback is not None:
+        _audio_playback.stop()
     _stop_input_queue()
     STATE.close_socket()
     if icon is not None:

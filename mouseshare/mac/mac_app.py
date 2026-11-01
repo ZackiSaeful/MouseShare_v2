@@ -1173,6 +1173,39 @@ def _stop_event_tap() -> None:
 _quit_event = threading.Event()
 _connection_loss_dispatch_lock = threading.Lock()
 _connection_loss_pending = False
+_pending_connection_lock = threading.Lock()
+_pending_connection_socket = None
+_AUTO_RECONNECT_WINDOW_SECONDS = 120.0
+
+
+def _track_pending_connection(sock) -> None:
+    global _pending_connection_socket
+    with _pending_connection_lock:
+        _pending_connection_socket = sock
+
+
+def _clear_pending_connection(sock) -> None:
+    global _pending_connection_socket
+    with _pending_connection_lock:
+        if _pending_connection_socket is sock:
+            _pending_connection_socket = None
+
+
+def _cancel_pending_connection() -> None:
+    """Close a socket while connect/handshake is still in progress."""
+    global _pending_connection_socket
+    with _pending_connection_lock:
+        sock, _pending_connection_socket = _pending_connection_socket, None
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
 
 
 def _schedule_connection_loss(expected_sock=None) -> None:
@@ -1332,13 +1365,28 @@ def _connect_loop(generation: int | None = None) -> None:
             return
         _event_tap_ready.wait(0.1)
 
+    retry_deadline = time.monotonic() + _AUTO_RECONNECT_WINDOW_SECONDS
     while still_current():
+        remaining = retry_deadline - time.monotonic()
+        if remaining <= 0:
+            message = (
+                "Automatic reconnect stopped after 2 minutes. "
+                "Click Retry Connection to try again, or Disconnect to stop Mousehare."
+            )
+            log.info("[NETWORK] %s", message)
+            _notify_status("error", message)
+            return
+
         log.info("[NETWORK] Connecting to %s:%d ...", host, port)
         _notify_status("connecting", f"Connecting to {host}:{port}…")
         s = None
         heartbeat = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            _track_pending_connection(s)
+            if not still_current():
+                s.close()
+                return
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             # Detect a powered-off or unreachable Windows host even when the
             # TCP session was previously idle and no FIN/RST reaches the Mac.
@@ -1401,8 +1449,10 @@ def _connect_loop(generation: int | None = None) -> None:
             )
             recv_t.start()
             recv_t.join()   # blocks until connection is lost
-            if time.monotonic() - connected_at >= 15.0:
-                retry_delay = 1.0
+            if still_current():
+                retry_deadline = time.monotonic() + _AUTO_RECONNECT_WINDOW_SECONDS
+                if time.monotonic() - connected_at >= 15.0:
+                    retry_delay = 1.0
 
         except HandshakeError as exc:
             log.error("[NETWORK] Secure pairing failed: %s", exc)
@@ -1425,6 +1475,7 @@ def _connect_loop(generation: int | None = None) -> None:
         finally:
             if heartbeat is not None:
                 heartbeat.stop()
+            _clear_pending_connection(s)
 
         if still_current():
             log.info("[NETWORK] Reconnecting in %.1f s...", retry_delay)
@@ -1439,13 +1490,7 @@ def _connect_loop(generation: int | None = None) -> None:
 
 def _do_quit(icon=None, _item=None) -> None:
     log.info("[SHUTDOWN] Quitting MouseShare Mac Agent...")
-    _quit_event.set()
-    _stop_event_tap()
-    restore_mac_safe()   # cursor MUST be shown/associated before exit
-    _stop_clipboard_sync()
-    _stop_audio_playback()
-    _stop_input_queue()
-    STATE.close_socket()
+    stop_backend()
     if icon is not None:
         icon.stop()
     log.info("[SHUTDOWN] Done -- goodbye!")
@@ -1493,18 +1538,29 @@ def start_backend(config: dict, status_callback=None) -> None:
 
 def stop_backend() -> None:
     """Stop network activity and restore the local mouse before returning."""
-    global _backend_generation
+    global _backend_generation, _switching_to_win, _switching_to_mac
     _backend_generation += 1
     _quit_event.set()
+    _cancel_pending_connection()
+
+    with STATE._lock:
+        force_cursor_restore = (
+            STATE.dev == DevState.WINDOWS_ACTIVE or STATE._cursor_hid
+        )
+    # Close the network first so blocked receive/input workers wake up. Reset
+    # ownership immediately so local events cannot remain suppressed while
+    # cleanup waits for those workers.
+    STATE.close_socket()
+    STATE.set_disconnected()
+    _switching_to_win = False
+    _switching_to_mac = False
     _stop_event_tap()
     if _event_tap_thread is not None and _event_tap_thread is not threading.current_thread():
         _event_tap_thread.join(timeout=1.0)
-    restore_mac_safe()
+    restore_mac_safe(force=force_cursor_restore)
     _stop_clipboard_sync()
     _stop_audio_playback()
     _stop_input_queue()
-    STATE.close_socket()
-    STATE.set_disconnected()
 
 
 def _run_event_tap_guarded(generation: int | None = None) -> None:

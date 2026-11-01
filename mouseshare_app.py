@@ -115,6 +115,9 @@ class MousehareApp:
         self.palette = PALETTES.get(self.settings.get("theme"), PALETTES["TVA"])
         self.events: queue.Queue[tuple[str, str]] = queue.Queue()
         self.backend_active = False
+        self._disconnecting = False
+        self._disconnect_thread: threading.Thread | None = None
+        self._retry_after_disconnect = False
         self.connection_status = "disconnected"
         self.current_page = "connect"
         self.settings_section = "General"
@@ -1596,10 +1599,12 @@ class MousehareApp:
         self._set_status("disconnected", status)
 
     def _start_or_retry(self) -> None:
+        if self._disconnecting:
+            return
         if self.backend_active:
             if self.connection_status == "error" and ROLE == "client":
+                self._retry_after_disconnect = True
                 self._disconnect()
-                self.root.after(180, self._start_or_retry)
             return
         config = self._validate_and_config()
         if config is None:
@@ -1618,18 +1623,47 @@ class MousehareApp:
             self.disconnect_button.configure(state="disabled")
             self._set_status("error", f"Could not start backend: {exc}")
 
-    def _disconnect(self) -> None:
-        if self.backend_active:
+    def _disconnect(self, *, wait: bool = False) -> None:
+        if self._disconnecting:
+            worker = self._disconnect_thread
+            if wait and worker is not None and worker is not threading.current_thread():
+                worker.join()
+                self._disconnecting = False
+                self.backend_active = False
+            return
+        if not self.backend_active:
+            self._set_status("disconnected", "Disconnected.")
+            return
+
+        if wait:
             try:
                 agent.stop_backend()
             except Exception as exc:
                 self._set_status("error", f"Backend shutdown error: {exc}")
-            self.backend_active = False
-        if hasattr(self, "primary_button"):
-            self.primary_button.configure(state="normal")
-        if hasattr(self, "disconnect_button"):
-            self.disconnect_button.configure(state="disabled")
-        self._set_status("disconnected", "Disconnected.")
+            else:
+                self._set_status("disconnected", "Disconnected.")
+            finally:
+                self.backend_active = False
+                self._disconnecting = False
+            return
+
+        # Keep Tk responsive while the backend cancels a pending socket and
+        # waits for its bounded cleanup workers to stop.
+        self._disconnecting = True
+        self._set_status("connecting", "Disconnecting and stopping reconnect attempts…")
+
+        def stop_backend() -> None:
+            try:
+                agent.stop_backend()
+            except Exception as exc:
+                self.events.put(("_disconnect_error", f"Backend shutdown error: {exc}"))
+            else:
+                self.events.put(("_disconnect_complete", "Disconnected."))
+
+        self._disconnect_thread = threading.Thread(
+            target=stop_backend, daemon=True, name="MousehareDisconnect"
+        )
+        self._disconnect_thread.start()
 
     def _poll_events(self) -> None:
         while True:
@@ -1637,6 +1671,26 @@ class MousehareApp:
                 status, message = self.events.get_nowait()
             except queue.Empty:
                 break
+            if status == "_disconnect_complete":
+                self._disconnecting = False
+                self._disconnect_thread = None
+                self.backend_active = False
+                should_retry = self._retry_after_disconnect
+                self._retry_after_disconnect = False
+                self._set_status("disconnected", message)
+                if should_retry:
+                    self.root.after(100, self._start_or_retry)
+                continue
+            if status == "_disconnect_error":
+                self._disconnecting = False
+                self._disconnect_thread = None
+                self._retry_after_disconnect = False
+                self._set_status("error", message)
+                continue
+            if self._disconnecting:
+                # Ignore late connection-status events from the session being
+                # stopped so they cannot make Disconnect appear ineffective.
+                continue
             if status == "error" and ROLE == "server":
                 self.backend_active = False
             self._set_status(status, message)
@@ -1663,6 +1717,12 @@ class MousehareApp:
                          self.network_mac_position_selector):
             if selector is not None and selector.winfo_exists():
                 selector.configure(state=position_state)
+        if self._disconnecting:
+            if primary is not None and primary.winfo_exists():
+                primary.configure(state="disabled", text="Disconnecting…")
+            if disconnect is not None and disconnect.winfo_exists():
+                disconnect.configure(state="disabled")
+            return
         if primary is None or not primary.winfo_exists():
             return
         idle_label = "Connect" if ROLE == "client" else "Start Server"
@@ -1693,7 +1753,8 @@ class MousehareApp:
         self.status_label.configure(fg=color if self.connection_status != "disconnected" else p["muted"])
 
     def close(self) -> None:
-        self._disconnect()
+        self._retry_after_disconnect = False
+        self._disconnect(wait=True)
         self.root.destroy()
         sys.exit(0)
 

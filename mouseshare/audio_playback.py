@@ -1,355 +1,247 @@
-"""Audio playback engine for Mousehare macOS client.
-
-Receives signed little-endian 16-bit 48,000 Hz stereo PCM in 20 ms frames
-(960 samples/channel, 3,840 bytes, 5,120 Base64 characters), rejects malformed
-or oversized frames, applies independent local stream gain (0-100), and outputs
-to the macOS audio endpoint.
-"""
+"""Bounded PCM playback for audio received from Windows on macOS."""
 from __future__ import annotations
 
-import array
+from array import array
 import base64
+import binascii
 import ctypes
+import ctypes.util
 import logging
-import queue
 import sys
 import threading
-import time
-from typing import Optional
+from collections import deque
 
-log = logging.getLogger(__name__)
-
-SAMPLE_RATE = 48000
+SAMPLE_RATE = 48_000
 CHANNELS = 2
-SAMPLE_WIDTH = 2
-FRAME_DURATION_MS = 20
-SAMPLES_PER_FRAME_PER_CH = int(SAMPLE_RATE * (FRAME_DURATION_MS / 1000.0))  # 960
-FRAME_BYTES = SAMPLES_PER_FRAME_PER_CH * CHANNELS * SAMPLE_WIDTH            # 3,840
-BASE64_FRAME_LEN = ((FRAME_BYTES + 2) // 3) * 4                              # 5,120
-MAX_PLAYBACK_QUEUE = 8
+SAMPLES_PER_FRAME = 960
+FRAME_BYTES = SAMPLES_PER_FRAME * CHANNELS * 2
+MAX_QUEUED_FRAMES = 8
+_BUFFER_COUNT = 3
+_LOG = logging.getLogger(__name__)
 
 
-def _create_macos_audio_queue_stream():
-    """Create a native macOS CoreAudio AudioQueue stream using ctypes (AudioToolbox framework)."""
-    try:
-        audio_toolbox = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")
-    except Exception as exc:
-        log.warning("[AUDIO] Could not load AudioToolbox.framework: %s", exc)
-        return None
-
-    class AudioStreamBasicDescription(ctypes.Structure):
-        _fields_ = [
-            ("mSampleRate", ctypes.c_double),
-            ("mFormatID", ctypes.c_uint32),
-            ("mFormatFlags", ctypes.c_uint32),
-            ("mBytesPerPacket", ctypes.c_uint32),
-            ("mFramesPerPacket", ctypes.c_uint32),
-            ("mBytesPerFrame", ctypes.c_uint32),
-            ("mChannelsPerFrame", ctypes.c_uint32),
-            ("mBitsPerChannel", ctypes.c_uint32),
-            ("mReserved", ctypes.c_uint32),
-        ]
-
-    class AudioQueueBuffer(ctypes.Structure):
-        _fields_ = [
-            ("mAudioDataBytesCapacity", ctypes.c_uint32),
-            ("mAudioData", ctypes.c_void_p),
-            ("mAudioDataByteSize", ctypes.c_uint32),
-            ("mUserData", ctypes.c_void_p),
-            ("mPacketDescriptionCapacity", ctypes.c_uint32),
-            ("mPacketDescriptions", ctypes.c_void_p),
-            ("mPacketDescriptionCount", ctypes.c_uint32),
-        ]
-
-    kAudioFormatLinearPCM = 0x6C70636D  # 'lpcm'
-    kAudioFormatFlagIsSignedInteger = 4
-    kAudioFormatFlagIsPacked = 8
-
-    asbd = AudioStreamBasicDescription(
-        mSampleRate=float(SAMPLE_RATE),
-        mFormatID=kAudioFormatLinearPCM,
-        mFormatFlags=kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
-        mBytesPerPacket=CHANNELS * SAMPLE_WIDTH,
-        mFramesPerPacket=1,
-        mBytesPerFrame=CHANNELS * SAMPLE_WIDTH,
-        mChannelsPerFrame=CHANNELS,
-        mBitsPerChannel=16,
-        mReserved=0,
-    )
-
-    AQCallback = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(AudioQueueBuffer))
-
-    class MacAudioQueueStream:
-        def __init__(self):
-            self.queue = ctypes.c_void_p()
-            self._cb = AQCallback(self._on_buffer_complete)
-            self._available = []
-            self._lock = threading.Lock()
-            self._started = False
-
-            hr = audio_toolbox.AudioQueueNewOutput(
-                ctypes.byref(asbd),
-                self._cb,
-                None,
-                None,
-                None,
-                0,
-                ctypes.byref(self.queue),
-            )
-            if hr != 0 or not self.queue.value:
-                raise RuntimeError(f"AudioQueueNewOutput failed with status {hr}")
-
-            self.buffers = []
-            for _ in range(6):  # 6 * 20ms = 120ms buffer pool
-                buf_ptr = ctypes.POINTER(AudioQueueBuffer)()
-                hr = audio_toolbox.AudioQueueAllocateBuffer(
-                    self.queue,
-                    FRAME_BYTES,
-                    ctypes.byref(buf_ptr),
-                )
-                if hr == 0 and buf_ptr:
-                    self.buffers.append(buf_ptr)
-                    self._available.append(buf_ptr)
-
-        def _on_buffer_complete(self, user_data, aq, buf_ptr):
-            with self._lock:
-                self._available.append(buf_ptr)
-
-        def write(self, data: bytes) -> None:
-            buf_ptr = None
-            for _ in range(15):
-                with self._lock:
-                    if self._available:
-                        buf_ptr = self._available.pop(0)
-                        break
-                time.sleep(0.002)
-
-            if buf_ptr is None:
-                # Buffer underrun/overrun, drop frame gracefully
-                return
-
-            buf = buf_ptr.contents
-            n = min(len(data), buf.mAudioDataBytesCapacity)
-            ctypes.memmove(buf.mAudioData, data, n)
-            buf.mAudioDataByteSize = n
-
-            audio_toolbox.AudioQueueEnqueueBuffer(self.queue, buf_ptr, 0, None)
-            if not self._started:
-                audio_toolbox.AudioQueueStart(self.queue, None)
-                self._started = True
-
-        def stop(self) -> None:
-            if self.queue and self.queue.value:
-                try:
-                    audio_toolbox.AudioQueueStop(self.queue, True)
-                    audio_toolbox.AudioQueueDispose(self.queue, True)
-                except Exception:
-                    pass
-                self.queue = None
-
-        def close(self) -> None:
-            self.stop()
-
-    return MacAudioQueueStream()
+class _AudioStreamBasicDescription(ctypes.Structure):
+    _fields_ = [
+        ("mSampleRate", ctypes.c_double),
+        ("mFormatID", ctypes.c_uint32),
+        ("mFormatFlags", ctypes.c_uint32),
+        ("mBytesPerPacket", ctypes.c_uint32),
+        ("mFramesPerPacket", ctypes.c_uint32),
+        ("mBytesPerFrame", ctypes.c_uint32),
+        ("mChannelsPerFrame", ctypes.c_uint32),
+        ("mBitsPerChannel", ctypes.c_uint32),
+        ("mReserved", ctypes.c_uint32),
+    ]
 
 
-class AudioPlayback:
-    """Manages audio playback for incoming Windows system audio stream."""
+class _AudioQueueBuffer(ctypes.Structure):
+    _fields_ = [
+        ("mAudioDataBytesCapacity", ctypes.c_uint32),
+        ("mAudioData", ctypes.c_void_p),
+        ("mAudioDataByteSize", ctypes.c_uint32),
+        ("mUserData", ctypes.c_void_p),
+        ("mPacketDescriptionCapacity", ctypes.c_uint32),
+        ("mPacketDescriptions", ctypes.c_void_p),
+        ("mPacketDescriptionCount", ctypes.c_uint32),
+    ]
 
-    def __init__(self, gain: int = 100) -> None:
+
+_AudioQueueOutputCallback = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p
+)
+_AudioQueueRef = ctypes.c_void_p
+_AudioQueueBufferRef = ctypes.c_void_p
+
+
+def _load_audio_queue():
+    if sys.platform != "darwin":
+        raise RuntimeError("CoreAudio AudioQueue playback is only available on macOS")
+    path = ctypes.util.find_library("AudioToolbox")
+    if not path:
+        path = "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox"
+    library = ctypes.CDLL(path)
+    library.AudioQueueNewOutput.argtypes = [
+        ctypes.POINTER(_AudioStreamBasicDescription),
+        _AudioQueueOutputCallback,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.POINTER(_AudioQueueRef),
+    ]
+    library.AudioQueueNewOutput.restype = ctypes.c_int32
+    library.AudioQueueAllocateBuffer.argtypes = [
+        _AudioQueueRef, ctypes.c_uint32, ctypes.POINTER(_AudioQueueBufferRef)
+    ]
+    library.AudioQueueAllocateBuffer.restype = ctypes.c_int32
+    library.AudioQueueEnqueueBuffer.argtypes = [
+        _AudioQueueRef, _AudioQueueBufferRef, ctypes.c_uint32, ctypes.c_void_p
+    ]
+    library.AudioQueueEnqueueBuffer.restype = ctypes.c_int32
+    library.AudioQueueStart.argtypes = [_AudioQueueRef, ctypes.c_void_p]
+    library.AudioQueueStart.restype = ctypes.c_int32
+    library.AudioQueueStop.argtypes = [_AudioQueueRef, ctypes.c_uint8]
+    library.AudioQueueStop.restype = ctypes.c_int32
+    library.AudioQueueDispose.argtypes = [_AudioQueueRef, ctypes.c_uint8]
+    library.AudioQueueDispose.restype = ctypes.c_int32
+    return library
+
+
+def _check_status(operation: str, status: int) -> None:
+    if status != 0:
+        raise RuntimeError(f"{operation} failed with CoreAudio OSStatus {status}")
+
+
+class PCMPlayback:
+    """Play validated 20 ms stereo int16 frames on the default Mac output."""
+
+    def __init__(self, gain: float = 0.8):
+        if array("h").itemsize != 2:
+            raise RuntimeError("This platform does not support 16-bit PCM samples")
+
+        self._frames: deque[bytes] = deque()
         self._lock = threading.Lock()
-        self._gain = max(0, min(100, int(gain)))
-        self._queue: queue.Queue[bytes] = queue.Queue(maxsize=MAX_PLAYBACK_QUEUE)
-        self._stop_event = threading.Event()
-        self._worker_thread: Optional[threading.Thread] = None
-        self._is_running = False
+        self._gain = max(0.0, min(1.0, float(gain)))
+        self._closed = False
+        self._reported_non_silent = False
+        self._queue: _AudioQueueRef = _AudioQueueRef()
+        self._buffers: list[_AudioQueueBufferRef] = []
+        self._library = _load_audio_queue()
+        self._callback_ref = _AudioQueueOutputCallback(self._handle_output_callback)
 
-    @property
-    def gain(self) -> int:
-        with self._lock:
-            return self._gain
+        audio_format = _AudioStreamBasicDescription(
+            mSampleRate=float(SAMPLE_RATE),
+            mFormatID=int.from_bytes(b"lpcm", "big"),
+            # Signed, packed, interleaved little-endian int16 PCM.
+            mFormatFlags=(1 << 2) | (1 << 3),
+            mBytesPerPacket=CHANNELS * 2,
+            mFramesPerPacket=1,
+            mBytesPerFrame=CHANNELS * 2,
+            mChannelsPerFrame=CHANNELS,
+            mBitsPerChannel=16,
+            mReserved=0,
+        )
 
-    def set_gain(self, gain: int) -> None:
-        with self._lock:
-            self._gain = max(0, min(100, int(gain)))
-
-    @property
-    def is_running(self) -> bool:
-        with self._lock:
-            return self._is_running and not self._stop_event.is_set()
-
-    def start(self) -> bool:
-        with self._lock:
-            if self._is_running and not self._stop_event.is_set():
-                return True
-            self._stop_event.clear()
-            while not self._queue.empty():
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    break
-            self._worker_thread = threading.Thread(
-                target=self._run_playback, daemon=True, name="AudioPlayback"
+        try:
+            _check_status(
+                "AudioQueueNewOutput",
+                self._library.AudioQueueNewOutput(
+                    ctypes.byref(audio_format), self._callback_ref,
+                    None, None, None, 0, ctypes.byref(self._queue),
+                ),
             )
-            self._is_running = True
-            self._worker_thread.start()
-            return True
+            for _ in range(_BUFFER_COUNT):
+                buffer_ref = _AudioQueueBufferRef()
+                _check_status(
+                    "AudioQueueAllocateBuffer",
+                    self._library.AudioQueueAllocateBuffer(
+                        self._queue, FRAME_BYTES, ctypes.byref(buffer_ref)
+                    ),
+                )
+                self._buffers.append(buffer_ref)
+                buffer = ctypes.cast(
+                    buffer_ref, ctypes.POINTER(_AudioQueueBuffer)
+                ).contents
+                ctypes.memset(buffer.mAudioData, 0, FRAME_BYTES)
+                buffer.mAudioDataByteSize = FRAME_BYTES
+                _check_status(
+                    "AudioQueueEnqueueBuffer",
+                    self._library.AudioQueueEnqueueBuffer(
+                        self._queue, buffer_ref, 0, None
+                    ),
+                )
+            _check_status(
+                "AudioQueueStart",
+                self._library.AudioQueueStart(self._queue, None),
+            )
+        except Exception:
+            self._dispose_queue()
+            raise
 
-    def stop(self) -> None:
+    def set_gain(self, gain: float) -> None:
         with self._lock:
-            if not self._is_running:
-                return
-            self._is_running = False
-            self._stop_event.set()
+            self._gain = max(0.0, min(1.0, float(gain)))
 
-        thread = self._worker_thread
-        if thread and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=0.5)
-
-        with self._lock:
-            self._worker_thread = None
-            while not self._queue.empty():
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    break
-
-    def feed_frame(self, b64_pcm: str) -> bool:
-        """Validate and enqueue one 20 ms PCM frame.
-
-        Rejects malformed, invalid length, or oversized frames.
-        Returns True if accepted and enqueued, False if rejected or dropped.
-        """
-        if not isinstance(b64_pcm, str) or len(b64_pcm) != BASE64_FRAME_LEN:
-            log.warning("[AUDIO] Dropping invalid base64 length %s != %d",
-                        len(b64_pcm) if isinstance(b64_pcm, str) else type(b64_pcm),
-                        BASE64_FRAME_LEN)
+    def push_base64(self, payload: str) -> bool:
+        if not isinstance(payload, str) or len(payload) != 5120:
             return False
-
         try:
-            pcm_bytes = base64.b64decode(b64_pcm, validate=True)
-        except Exception as exc:
-            log.warning("[AUDIO] Base64 decode failed: %s", exc)
+            frame = base64.b64decode(payload, validate=True)
+        except (ValueError, binascii.Error):
             return False
-
-        if len(pcm_bytes) != FRAME_BYTES:
-            log.warning("[AUDIO] Decoded frame size %d != %d. Rejected.", len(pcm_bytes), FRAME_BYTES)
+        if len(frame) != FRAME_BYTES:
             return False
-
-        # Apply local gain
         with self._lock:
-            gain_val = self._gain
+            if self._closed:
+                return False
+            if len(self._frames) >= MAX_QUEUED_FRAMES:
+                self._frames.popleft()
+            self._frames.append(frame)
+        return True
 
-        if gain_val == 0:
-            # Muted: send silence frame
-            processed = b"\x00" * FRAME_BYTES
-        elif gain_val != 100:
-            # Scale int16 samples
-            samples = array.array("h")
-            samples.frombytes(pcm_bytes)
-            factor = gain_val / 100.0
-            for i in range(len(samples)):
-                scaled = int(samples[i] * factor)
-                samples[i] = max(-32768, min(32767, scaled))
-            processed = samples.tobytes()
-        else:
-            processed = pcm_bytes
+    def _apply_gain(self, frame: bytes, gain: float) -> bytes:
+        if gain >= 0.999:
+            return frame
+        if gain <= 0.001:
+            return bytes(FRAME_BYTES)
+        samples = array("h")
+        samples.frombytes(frame)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        for index, sample in enumerate(samples):
+            samples[index] = int(sample * gain)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        return samples.tobytes()
 
-        # Put to bounded playback queue; drop oldest on overload
+    def _handle_output_callback(self, _user_data, queue_ref, buffer_ref) -> None:
         try:
-            self._queue.put_nowait(processed)
-            return True
-        except queue.Full:
+            with self._lock:
+                if self._closed:
+                    return
+                frame = self._frames.popleft() if self._frames else None
+                gain = self._gain
+
+            buffer = ctypes.cast(
+                buffer_ref, ctypes.POINTER(_AudioQueueBuffer)
+            ).contents
+            if frame is None:
+                ctypes.memset(buffer.mAudioData, 0, FRAME_BYTES)
+            else:
+                if not self._reported_non_silent and any(frame):
+                    self._reported_non_silent = True
+                    _LOG.info("First non-silent Windows PCM frame queued to Mac CoreAudio")
+                frame = self._apply_gain(frame, gain)
+                ctypes.memmove(buffer.mAudioData, frame, FRAME_BYTES)
+            buffer.mAudioDataByteSize = FRAME_BYTES
+            status = self._library.AudioQueueEnqueueBuffer(
+                queue_ref, buffer_ref, 0, None
+            )
+            if status != 0:
+                with self._lock:
+                    closed = self._closed
+                if not closed:
+                    _LOG.error("AudioQueueEnqueueBuffer callback failed: %s", status)
+        except Exception:
+            _LOG.exception("Mac AudioQueue output callback failed")
+
+    def _dispose_queue(self) -> None:
+        queue_ref, self._queue = self._queue, _AudioQueueRef()
+        if queue_ref:
             try:
-                self._queue.get_nowait()
-            except queue.Empty:
+                self._library.AudioQueueStop(queue_ref, 1)
+            except Exception:
                 pass
             try:
-                self._queue.put_nowait(processed)
-                return True
-            except queue.Full:
-                return False
+                self._library.AudioQueueDispose(queue_ref, 1)
+            except Exception:
+                pass
+        self._buffers.clear()
 
-    def _run_playback(self) -> None:
-        p = None
-        stream = None
-        try:
-            # 1. Try PyAudio backend
-            try:
-                import pyaudio
-                p = pyaudio.PyAudio()
-                stream = p.open(
-                    format=pyaudio.paInt16,
-                    channels=CHANNELS,
-                    rate=SAMPLE_RATE,
-                    output=True,
-                    frames_per_buffer=SAMPLES_PER_FRAME_PER_CH,
-                )
-                log.info("[AUDIO] Playback active using PyAudio backend.")
-            except Exception as exc:
-                p = None
-                stream = None
-
-            # 2. Try sounddevice backend if PyAudio is not available
-            if stream is None:
-                try:
-                    import sounddevice as sd
-                    sd_stream = sd.RawOutputStream(
-                        samplerate=SAMPLE_RATE,
-                        channels=CHANNELS,
-                        dtype='int16',
-                        blocksize=SAMPLES_PER_FRAME_PER_CH,
-                    )
-                    sd_stream.start()
-                    stream = sd_stream
-                    log.info("[AUDIO] Playback active using sounddevice backend.")
-                except Exception:
-                    stream = None
-
-            # 3. Try native macOS CoreAudio AudioQueue (AudioToolbox) backend
-            if stream is None and sys.platform == "darwin":
-                try:
-                    stream = _create_macos_audio_queue_stream()
-                    if stream is not None:
-                        log.info("[AUDIO] Playback active using native macOS CoreAudio (AudioToolbox) backend.")
-                except Exception as exc:
-                    log.warning("[AUDIO] Native macOS CoreAudio init failed: %s", exc)
-                    stream = None
-
-            if stream is None:
-                log.info("[AUDIO] No active audio output backend available. Running in discard mode.")
-
-            while not self._stop_event.is_set():
-                try:
-                    data = self._queue.get(timeout=0.05)
-                except queue.Empty:
-                    continue
-
-                if stream is not None:
-                    try:
-                        stream.write(data)
-                    except Exception as exc:
-                        log.warning("[AUDIO] Output write error: %s", exc)
-                        time.sleep(0.01)
-
-        except Exception as exc:
-            log.error("[AUDIO] Playback loop failed: %s", exc)
-        finally:
-            if stream is not None:
-                try:
-                    if hasattr(stream, "stop_stream"):
-                        stream.stop_stream()
-                    elif hasattr(stream, "stop"):
-                        stream.stop()
-                except Exception:
-                    pass
-                try:
-                    if hasattr(stream, "close"):
-                        stream.close()
-                except Exception:
-                    pass
-            if p is not None:
-                try:
-                    p.terminate()
-                except Exception:
-                    pass
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._frames.clear()
+        self._dispose_queue()

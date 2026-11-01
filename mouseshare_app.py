@@ -997,9 +997,10 @@ class MousehareApp:
             audio_toggle.pack(anchor="w", pady=(0, 4))
             self._settings_wrap_label(audio_toggle, pad=48)
 
-            desc = ("Streams Windows system output mix to the paired Mac client over the authenticated, "
-                    "encrypted connection (WASAPI loopback). Off by default. Requires both computers to enable "
-                    "audio sharing. Captures system output only; microphone audio is never captured."
+            desc = ("Copies Windows system output mix to the paired Mac client over the authenticated, "
+                    "encrypted connection (WASAPI loopback). Does not mute or alter Windows master volume—"
+                    "sound continues playing normally on Windows. Off by default; microphone audio is never captured. "
+                    "Requires both computers to enable audio sharing."
                     if ROLE == "server" else
                     "Receives Windows system audio stream over the authenticated, encrypted connection. "
                     "Off by default. Both computers must enable audio sharing.")

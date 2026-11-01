@@ -7,9 +7,64 @@ Windows Agent is the TCP server.  It receives keyboard and mouse events from
 the Mac agent and injects them into Windows using pynput.
 It also monitors the edge facing the Mac and returns the pointer to the matching
 Mac edge. The Mac's configured placement is exchanged during secure pairing.
-Synthetic (injected) mouse events must be observed by the listener rather than
-filtered so the edge detector can detect when remotely controlled motion reaches
-the screen edge and hand control back to the Mac.
+
+## Handoff messages and position mapping
+
+The authenticated control stream uses protocol v3: encrypted JSON messages are
+carried in the existing sequence-checked TCP frames. A Mac-to-Windows
+`activate_windows` message supplies `position` as a normalized fraction from
+0.0 to 1.0 along the Mac edge. Windows maps that fraction to the configured
+entry edge (`mac_position`) using its virtual-screen dimensions: vertical
+positions for left/right, horizontal positions for top/bottom. If a
+multi-monitor layout leaves a gap on that outer edge, Windows chooses the
+nearest real monitor on the edge and reports the resulting fraction.
+Protocol v3 carries no monitor identifier or display geometry, so it cannot
+guarantee exact monitor-to-monitor alignment when either computer has multiple
+displays; that would require a coordinated protocol extension.
+
+After updating its active state and attempting cursor placement, Windows now
+sends this encrypted server-to-client message:
+
+```json
+{
+  "type": "activation_ack",
+  "active": true,
+  "cursor_positioned": true,
+  "edge": "left",
+  "position": 0.9
+}
+```
+
+`cursor_positioned` is false if Windows could not position the pointer;
+`position` is the effective normalized location (or the requested location if
+placement failed). This is an additive protocol-v3 application message: the
+handshake, encryption, frame layout, and existing message fields are unchanged.
+An older Mac client ignores unknown message types, so it will not display this
+confirmation until its receiver is updated.
+
+For the Mac client to use the confirmation, add an `activation_ack` branch to
+`mouseshare/mac/mac_app.py::_handle_incoming`. Treat `active: true` and
+`cursor_positioned: true` as the server's confirmation; surface the failure
+fields if cursor placement failed. The current Mac switches to
+`WINDOWS_ACTIVE` optimistically in `switch_to_windows` and currently ignores
+this message, so that client-side status behavior still needs to be aligned.
+
+The Mac client also needs to use one coordinate unit consistently when it
+computes and warps edge positions. Its current handoff path combines
+`CGEventGetLocation` / `CGWarpMouseCursorPosition` global display coordinates
+with `CGDisplayPixelsWide` / `CGDisplayPixelsHigh` pixel dimensions. Use
+`CGDisplayBounds` dimensions for those global coordinates (or convert both
+positions and dimensions to pixels consistently) in the edge detection,
+fraction calculation, and return warp. The fraction message itself remains
+dimensionless, so this correction does not require a protocol-version bump.
+
+On return, Windows derives the fraction from the cursor's actual exit
+coordinate on the virtual desktop; it does not reuse a saved entry position.
+`edge` remains the only Windows message that asks the Mac to resume control;
+`activation_ack` only reports Windows' state. Synthetic (injected) mouse events
+must be observed by the listener rather than filtered so the edge detector can
+detect when remotely controlled motion reaches the screen edge and hand
+control back to the Mac.
 
 ## Requirements
 - Windows 10 / 11
@@ -48,6 +103,36 @@ from a recorded pairing exchange. Existing longer keys remain valid.
 Plain-text clipboard sharing is optional and off by default. Enable it under
 Settings → Security on both computers and reconnect both sides. Only text up to
 48 KiB is shared over the encrypted pairing; images and files are not shared.
+
+## Audio Sharing (WASAPI Loopback)
+
+Audio sharing streams the Windows **system output mix** to the paired Mac client
+as an additional audio stream through the Mac's default audio output.
+
+### Endpoint Selection and Privacy
+- **Render Endpoint Loopback**: Windows captures via WASAPI loopback on the default
+  audio render endpoint (`eRender` / `pyaudio.paWASAPI` default output device).
+- **Microphone Is Never Captured**: Input/capture endpoints (`eCapture`) are strictly ignored.
+- **Local Volume Preserved**: Capturing loopback does not mute, alter, or redirect
+  Windows master or application volume; sound continues to play normally on Windows.
+- **Double Opt-In**: Audio capture starts only when both the Windows `audio_share` preference
+  and the latest Mac `audio_control.enabled` are true over an authenticated, encrypted
+  `SecureChannel`. Default is off on both computers.
+
+### Wire Specification
+- Format: Signed 16-bit little-endian integer (`paInt16`).
+- Sample Rate: 48,000 Hz.
+- Channels: 2 (Stereo).
+- Frame Duration: Exactly 20 ms (960 samples/channel; 3,840 decoded bytes).
+- Envelope: `{"type": "audio_pcm", "pcm": "<base64>"}` (5,120 Base64 characters).
+- Overload Control: Small bounded queue (max 5 frames, 100 ms buffer) drops stale frames on
+  network congestion to preserve real-time low latency.
+- Transport: Runs over the established `SecureChannel` with `TCP_NODELAY`. Legacy v1 unencrypted
+  sessions are rejected.
+
+### Runtime Dependencies
+- `pyaudiowpatch==0.2.12.9` (pinned PortAudio fork with Windows WASAPI loopback support).
+  No device or audio subsystem is initialized on import or when audio sharing is disabled.
 
 ## Running
 

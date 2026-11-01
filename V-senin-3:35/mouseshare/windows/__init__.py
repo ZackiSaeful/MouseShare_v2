@@ -1,0 +1,1 @@
+"""Windows Mousehare server agent."""

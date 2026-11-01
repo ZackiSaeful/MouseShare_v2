@@ -1,0 +1,7 @@
+{
+    "windows_host": "192.168.2.101",
+    "port": 5555,
+    "token": "CHANGE_ME",
+    "edge_threshold": 3,
+    "debug": true
+}

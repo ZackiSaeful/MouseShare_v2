@@ -26,7 +26,6 @@ from pathlib import Path
 try:
     import Quartz
     from Quartz import (
-        CGAssociateMouseAndMouseCursorPosition,
         CGDisplayBounds,
         CGDisplayHideCursor,
         CGDisplayShowCursor,
@@ -94,17 +93,6 @@ except ImportError as _e:
     sys.exit(1)
 
 try:
-    from AppKit import (
-        NSApplicationActivateIgnoringOtherApps,
-        NSRunningApplication,
-        NSWorkspace,
-    )
-except ImportError as _e:
-    print(f"[FATAL] Cannot import AppKit: {_e}")
-    print("        pip install pyobjc-framework-Cocoa")
-    sys.exit(1)
-
-try:
     import pystray
     from PIL import Image, ImageDraw
 except ImportError as _e:
@@ -116,11 +104,13 @@ try:
     from ..secure_transport import HandshakeError, LegacyChannel, client_handshake, opposite_edge
     from ..input_coalescer import OrderedInputQueue
     from ..clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
+    from ..audio_playback import PCMPlayback
 except ImportError:  # Direct legacy execution: python mac_app.py
     from protocol import recv_message, send_message
     from mouseshare.secure_transport import HandshakeError, LegacyChannel, client_handshake, opposite_edge
     from mouseshare.input_coalescer import OrderedInputQueue
     from mouseshare.clipboard_sync import ClipboardSynchronizer, valid_clipboard_text
+    from mouseshare.audio_playback import PCMPlayback
 
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -229,7 +219,6 @@ class AppState:
         self._sock       = None          # active TCP socket
         self._channel    = None          # authenticated encrypted stream
         self._cursor_hid = False         # True while cursor is hidden
-        self._dissoc     = False         # True while mouse is dissociated
 
     # ── Properties ────────────────────────────────────────────────────────────
     @property
@@ -305,6 +294,104 @@ CONFIG: dict = {}
 _status_callback = None
 _clipboard_sync_lock = threading.Lock()
 _clipboard_sync: ClipboardSynchronizer | None = None
+_audio_playback_lock = threading.Lock()
+_audio_playback: PCMPlayback | None = None
+_audio_playback_init_failed = False
+_audio_first_pcm_logged = False
+_audio_control_socket = None
+_audio_control_enabled: bool | None = None
+
+
+def _stop_audio_playback() -> None:
+    global _audio_playback, _audio_playback_init_failed, _audio_first_pcm_logged
+    with _audio_playback_lock:
+        player, _audio_playback = _audio_playback, None
+        _audio_playback_init_failed = False
+        _audio_first_pcm_logged = False
+    if player is not None:
+        try:
+            player.close()
+        except Exception:
+            log.exception("[AUDIO] Could not stop Mac playback")
+
+
+def _ensure_audio_playback(force_retry: bool = False) -> bool:
+    """Open the Mac output before asking Windows to mute its local speakers."""
+    global _audio_playback, _audio_playback_init_failed
+    with _audio_playback_lock:
+        if _audio_playback is not None:
+            _audio_playback.set_gain(
+                int(CONFIG.get("windows_audio_volume", 80)) / 100.0
+            )
+            return True
+        if _audio_playback_init_failed and not force_retry:
+            return False
+        try:
+            gain = int(CONFIG.get("windows_audio_volume", 80)) / 100.0
+            _audio_playback = PCMPlayback(gain)
+            _audio_playback_init_failed = False
+        except Exception:
+            _audio_playback_init_failed = True
+            log.exception("[AUDIO] Could not open Mac audio output; Windows stays unmuted")
+            return False
+    log.info("[AUDIO] Mac CoreAudio output is ready (48 kHz stereo)")
+    return True
+
+
+def _send_audio_control(sock, channel, enabled: bool, force: bool = False) -> None:
+    global _audio_control_socket, _audio_control_enabled
+    if channel is None or not channel.is_encrypted:
+        return
+    enabled = bool(enabled)
+    if (force or sock is not _audio_control_socket
+            or enabled != _audio_control_enabled):
+        channel.send(sock, {"type": "audio_control", "enabled": enabled}, send_message)
+        _audio_control_socket = sock
+        _audio_control_enabled = enabled
+
+
+def set_audio_share(enabled: bool, volume: int | None = None) -> None:
+    """Toggle receipt of Windows audio and independently adjust its Mac gain."""
+    CONFIG["audio_share"] = bool(enabled)
+    if volume is not None:
+        CONFIG["windows_audio_volume"] = max(0, min(100, int(volume)))
+    with STATE._lock:
+        sock, channel = STATE._sock, STATE._channel
+    connected_secure = bool(
+        sock is not None and channel is not None and channel.is_encrypted
+    )
+    output_ready = bool(enabled and connected_secure
+                        and _ensure_audio_playback(force_retry=True))
+    active = bool(enabled and connected_secure and output_ready)
+    if connected_secure:
+        try:
+            _send_audio_control(sock, channel, active)
+        except Exception:
+            log.exception("[AUDIO] Could not update Windows audio routing state")
+    if not enabled:
+        _stop_audio_playback()
+
+
+def _receive_audio_frame(message: dict) -> None:
+    global _audio_first_pcm_logged
+    if not CONFIG.get("audio_share"):
+        return
+    with STATE._lock:
+        channel = STATE._channel
+    if channel is None or not channel.is_encrypted:
+        return
+    with _audio_playback_lock:
+        player = _audio_playback
+    if player is None:
+        log.error("[AUDIO] Received audio before Mac output was ready; frame ignored")
+        return
+    if not player.push_base64(message.get("pcm")):
+        log.warning("[AUDIO] Discarded invalid PCM frame")
+    else:
+        with _audio_playback_lock:
+            first_frame, _audio_first_pcm_logged = not _audio_first_pcm_logged, True
+        if first_frame:
+            log.info("[AUDIO] First Windows PCM frame accepted by Mac output queue")
 _input_queue: OrderedInputQueue | None = None
 
 
@@ -441,56 +528,6 @@ def _show_cursor() -> None:
             log.error("[CURSOR] Show failed (CGDisplayShowCursor=%d)", result)
 
 
-def _dissociate_mouse() -> None:
-    """Detach physical mouse movement from the on-screen cursor position."""
-    if not STATE._dissoc:
-        result = int(CGAssociateMouseAndMouseCursorPosition(False))
-        if result == 0:
-            STATE._dissoc = True
-            log.info("[CURSOR] Mouse dissociated (CGAssociate=%d)", result)
-        else:
-            log.error("[CURSOR] Mouse dissociation failed (CGAssociate=%d)", result)
-
-
-def _associate_mouse() -> None:
-    """Re-attach physical mouse movement to the on-screen cursor."""
-    if STATE._dissoc:
-        result = int(CGAssociateMouseAndMouseCursorPosition(True))
-        if result == 0:
-            STATE._dissoc = False
-            log.info("[CURSOR] Mouse re-associated (CGAssociate=%d)", result)
-        else:
-            log.error("[CURSOR] Mouse re-association failed (CGAssociate=%d)", result)
-
-
-def _with_mousehare_foreground(action) -> bool:
-    """Run cursor-control APIs while Mousehare is frontmost, then restore focus."""
-    current = NSRunningApplication.currentApplication()
-    previous = NSWorkspace.sharedWorkspace().frontmostApplication()
-    current_pid = int(current.processIdentifier())
-    previous_pid = int(previous.processIdentifier()) if previous is not None else None
-    was_frontmost = previous_pid == current_pid
-
-    if not was_frontmost:
-        if not current.activateWithOptions_(NSApplicationActivateIgnoringOtherApps):
-            log.error("[CURSOR] Could not activate Mousehare for cursor control")
-            return False
-        deadline = time.monotonic() + 1.0
-        while not current.isActive() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not current.isActive():
-            log.error("[CURSOR] Mousehare did not become the foreground app")
-            if previous is not None and not previous.isTerminated():
-                previous.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
-            return False
-
-    try:
-        return bool(action())
-    finally:
-        if not was_frontmost and previous is not None and not previous.isTerminated():
-            previous.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
-
-
 def _release_mac_mouse_buttons() -> None:
     """End any local drag before transferring the pointer to Windows."""
     button_specs = {
@@ -516,14 +553,8 @@ def _release_mac_mouse_buttons() -> None:
 
 
 def restore_mac_safe() -> None:
-    """Always-safe cleanup: re-associate mouse and show cursor.
-    Call on disconnect, exception, or quit to avoid stuck invisible cursor."""
-    def restore() -> bool:
-        _associate_mouse()
-        _show_cursor()
-        return not STATE._dissoc and not STATE._cursor_hid
-
-    _with_mousehare_foreground(restore)
+    """Always-safe cleanup: show cursor after a handoff or disconnect."""
+    _show_cursor()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -693,8 +724,8 @@ def switch_to_windows() -> None:
         }):
             _on_conn_lost()
             return
-        # Park, detach, and hide while Mousehare is briefly frontmost. macOS
-        # may reject these CoreGraphics operations when this app is in back.
+        # Park and hide without activating the Mousehare UI. The event tap
+        # suppresses local input, so cursor dissociation is unnecessary.
         left, top, width, height = _main_display_geometry()
         if mac_exit_edge in ("left", "right"):
             safe = max(int(top), min(int(_last_edge_coord), int(top + height - 1)))
@@ -705,23 +736,18 @@ def switch_to_windows() -> None:
             y = top + 5 if mac_exit_edge == "top" else top + height - 6
             point = (safe, y)
 
-        def prepare_cursor_for_windows() -> bool:
-            warp_result = int(CGWarpMouseCursorPosition(point))
-            if warp_result != 0:
-                log.error("[CURSOR] Edge warp failed (CGWarp=%d)", warp_result)
-                return False
-            _dissociate_mouse()
-            _hide_cursor()
-            return STATE._dissoc and STATE._cursor_hid
-
-        if not _with_mousehare_foreground(prepare_cursor_for_windows):
+        warp_result = int(CGWarpMouseCursorPosition(point))
+        if warp_result != 0:
+            log.error("[CURSOR] Edge warp failed (CGWarp=%d)", warp_result)
+        _hide_cursor()
+        if warp_result != 0 or not STATE._cursor_hid:
             log.error("[EDGE] Cursor setup failed; cancelling Windows handoff")
             _queue_remote_input({"type": "deactivate_windows"})
             restore_mac_safe()
             _switching_to_win = False
             _notify_status(
                 "connected",
-                "macOS denied cursor control. Keep Mousehare open and retry the handoff.",
+                "macOS did not allow hiding the cursor in the background; handoff was cancelled.",
             )
             return
 
@@ -766,18 +792,11 @@ def switch_to_mac(windows_edge: str, position: float | None = None) -> None:
                 safe = max(int(left), min(int(_last_edge_coord), int(left + width - 1)))
                 y = top + 5 if mac_entry_edge == "top" else top + height - 6
                 point = (safe, y)
-            def restore_cursor_to_mac() -> bool:
-                warp_result = int(CGWarpMouseCursorPosition(point))
-                if warp_result != 0:
-                    log.error("[CURSOR] Mac edge warp failed (CGWarp=%d)", warp_result)
-                _associate_mouse()
-                _show_cursor()
-                log.debug("[CURSOR] Warped to Mac %s edge at %s", mac_entry_edge, point)
-                return not STATE._dissoc and not STATE._cursor_hid
-
-            if not _with_mousehare_foreground(restore_cursor_to_mac):
-                log.error("[EDGE] Cursor restore reported failure; retrying safe restore")
-                restore_mac_safe()
+            warp_result = int(CGWarpMouseCursorPosition(point))
+            if warp_result != 0:
+                log.error("[CURSOR] Mac edge warp failed (CGWarp=%d)", warp_result)
+            _show_cursor()
+            log.debug("[CURSOR] Warped to Mac %s edge at %s", mac_entry_edge, point)
             STATE.set_mac_active()
         except Exception:
             log.exception("[EDGE] Could not complete Windows-to-Mac handoff")
@@ -1070,6 +1089,7 @@ def _on_conn_lost(expected_sock=None) -> None:
     log.info("[STATE]   Resetting to MAC_ACTIVE (safe fallback)")
     restore_mac_safe()     # show cursor, re-associate mouse -- always safe
     _stop_clipboard_sync()
+    _stop_audio_playback()
     STATE.close_socket()
     STATE.set_disconnected()
     _notify_status("connecting", "Connection lost. Reconnecting…")
@@ -1106,6 +1126,9 @@ def _handle_incoming(msg: dict) -> None:
 
     elif msg_type == "clipboard":
         _apply_remote_clipboard(msg)
+
+    elif msg_type == "audio_pcm":
+        _receive_audio_frame(msg)
 
     elif msg_type == "hello_error":
         log.error("[NETWORK] The Windows server rejected pairing.")
@@ -1177,6 +1200,13 @@ def _connect_loop(generation: int | None = None) -> None:
             STATE.set_connected(s, channel, clipboard_enabled)
             if clipboard_enabled:
                 _start_clipboard_sync()
+            if channel.is_encrypted:
+                audio_enabled = bool(CONFIG.get("audio_share", False))
+                if audio_enabled:
+                    # Do not let Windows mute its speakers until the Mac has
+                    # successfully opened a real output queue.
+                    audio_enabled = _ensure_audio_playback(force_retry=True)
+                _send_audio_control(s, channel, audio_enabled, force=True)
 
             # Run the receive loop and wait until it exits (connection lost)
             recv_t = threading.Thread(
@@ -1219,6 +1249,7 @@ def _do_quit(icon=None, _item=None) -> None:
     _stop_event_tap()
     restore_mac_safe()   # cursor MUST be shown/associated before exit
     _stop_clipboard_sync()
+    _stop_audio_playback()
     _stop_input_queue()
     STATE.close_socket()
     if icon is not None:
@@ -1276,6 +1307,7 @@ def stop_backend() -> None:
         _event_tap_thread.join(timeout=1.0)
     restore_mac_safe()
     _stop_clipboard_sync()
+    _stop_audio_playback()
     _stop_input_queue()
     STATE.close_socket()
     STATE.set_disconnected()

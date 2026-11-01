@@ -94,6 +94,8 @@ def default_settings() -> dict:
         "theme": "TVA",
         "local_discovery": False,
         "clipboard_sync": False,
+        "audio_share": False,
+        "windows_audio_volume": 80,
         "allow_legacy_protocol": False,
         "debug": False,
     }
@@ -633,6 +635,28 @@ class MousehareApp:
                 wraplength=520, justify="left")
             self.mac_position_hint.pack(anchor="w", pady=(0, 10))
 
+            self.audio_share_var = tk.BooleanVar(
+                value=bool(self.settings.get("audio_share", False)))
+            audio_toggle = tk.Checkbutton(
+                details_inner, text="Play Windows audio on this Mac",
+                variable=self.audio_share_var, command=self._save_audio_preferences,
+                bg=p["panel"], fg=p["text"], selectcolor=p["field"],
+                activebackground=p["panel"], activeforeground=p["text"],
+                disabledforeground=p["disabled"], font=("Arial", 10, "bold"),
+            )
+            audio_toggle.pack(anchor="w", pady=(0, 10))
+        else:
+            self.audio_share_var = tk.BooleanVar(
+                value=bool(self.settings.get("audio_share", False)))
+            audio_toggle = tk.Checkbutton(
+                details_inner, text="Route Windows audio to Mac (mute Windows locally)",
+                variable=self.audio_share_var, command=self._save_audio_preferences,
+                bg=p["panel"], fg=p["text"], selectcolor=p["field"],
+                activebackground=p["panel"], activeforeground=p["text"],
+                disabledforeground=p["disabled"], font=("Arial", 10, "bold"),
+            )
+            audio_toggle.pack(anchor="w", pady=(0, 10))
+
         controls = tk.Frame(details_inner, bg=p["panel"])
         controls.pack(fill="x")
         self.primary_button = self._button(
@@ -783,6 +807,36 @@ class MousehareApp:
             tk.Label(wrap, text="Mousehare's existing TCP protocol uses port 5555 by default.",
                      bg=p["panel"], fg=p["muted"], font=("Arial", 9),
                      wraplength=500, justify="left").pack(anchor="w", pady=(14, 0))
+            if ROLE == "client":
+                audio_box = tk.Frame(wrap, bg=p["panel"])
+                audio_box.pack(anchor="w", fill="x", pady=(18, 0))
+                self.audio_share_var = tk.BooleanVar(
+                    value=bool(self.settings.get("audio_share", False)))
+                tk.Checkbutton(
+                    audio_box, text="Play Windows system audio on this Mac",
+                    variable=self.audio_share_var, command=self._save_audio_preferences,
+                    bg=p["panel"], fg=p["text"], selectcolor=p["field"],
+                    activebackground=p["panel"], activeforeground=p["text"],
+                    disabledforeground=p["disabled"], font=("Arial", 10, "bold"),
+                ).pack(anchor="w")
+                self.windows_audio_volume_var = tk.IntVar(
+                    value=max(0, min(100, int(self.settings.get("windows_audio_volume", 80)))))
+                tk.Label(audio_box, text="Windows audio volume on Mac", bg=p["panel"],
+                         fg=p["muted"], font=("Arial", 9)).pack(anchor="w", pady=(6, 0))
+                scale = tk.Scale(
+                    audio_box, from_=0, to=100, orient="horizontal",
+                    variable=self.windows_audio_volume_var, command=self._audio_volume_changed,
+                    bg=p["panel"], fg=p["text"], troughcolor=p["panel2"],
+                    activebackground=p["accent"], highlightthickness=0,
+                    showvalue=True, length=260,
+                )
+                scale.pack(anchor="w")
+                scale.bind("<ButtonRelease-1>",
+                           lambda _event: self._save_audio_preferences())
+                tk.Label(audio_box,
+                         text="Also enable audio sharing on Windows. While the stream is active, audio plays on this Mac and Windows output is muted.",
+                         bg=p["panel"], fg=p["muted"], font=("Arial", 8),
+                         wraplength=500, justify="left").pack(anchor="w")
         elif self.settings_section == "Network":
             tk.Label(wrap, text="Manual IP and port configuration stays available on every build.",
                      bg=p["panel"], fg=p["text"], font=("Arial", 10),
@@ -905,6 +959,31 @@ class MousehareApp:
         if not self._save_settings():
             return
         self._set_status("disconnected", f"Default port saved: {port}.")
+
+    def _audio_volume_changed(self, _value=None) -> None:
+        if ROLE != "client" or not hasattr(self, "windows_audio_volume_var"):
+            return
+        volume = int(self.windows_audio_volume_var.get())
+        self.settings["windows_audio_volume"] = volume
+        if self.backend_active:
+            agent.set_audio_share(bool(self.settings.get("audio_share", False)), volume)
+
+    def _save_audio_preferences(self) -> None:
+        self.settings["audio_share"] = bool(self.audio_share_var.get())
+        if ROLE == "client" and hasattr(self, "windows_audio_volume_var"):
+            self.settings["windows_audio_volume"] = int(self.windows_audio_volume_var.get())
+        if not self._save_settings():
+            return
+        if self.backend_active:
+            if ROLE == "client":
+                agent.set_audio_share(
+                    self.settings["audio_share"], self.settings.get("windows_audio_volume", 80))
+            else:
+                handler = getattr(agent, "set_audio_share_enabled", None)
+                if handler is None:
+                    self._set_status("error", "Windows audio sharing handler is unavailable.")
+                    return
+                handler(self.settings["audio_share"])
 
     def _save_network_settings(self) -> None:
         try:
@@ -1158,6 +1237,8 @@ class MousehareApp:
                     "edge_threshold": int(self.settings.get("edge_threshold", 3)),
                     "mac_position": self.settings.get("mac_position", "left"),
                     "clipboard_sync": bool(self.settings.get("clipboard_sync", False)),
+                    "audio_share": bool(self.settings.get("audio_share", False)),
+                    "windows_audio_volume": int(self.settings.get("windows_audio_volume", 80)),
                     "allow_legacy_protocol": bool(self.settings.get("allow_legacy_protocol", False)),
                     "debug": False}
         self.settings["server_port"] = port

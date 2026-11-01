@@ -20,6 +20,7 @@ import logging
 import socket
 import sys
 import threading
+import time
 from enum import Enum, auto
 from pathlib import Path
 
@@ -277,6 +278,7 @@ def _apply_remote_clipboard(msg: dict) -> None:
 
 _edge_sent = False
 _edge_lock = threading.Lock()
+_edge_ignore_until = 0.0
 
 
 def _on_mouse_move(x: int, y: int) -> None:
@@ -295,6 +297,12 @@ def _on_mouse_move(x: int, y: int) -> None:
         # Reset debounce when not active, so the next activation works cleanly
         with _edge_lock:
             _edge_sent = False
+        return
+
+    # SetCursorPos during activation can generate a delayed listener callback
+    # at the entry edge. Ignore that initial warp so it cannot immediately
+    # return control to the Mac before the user moves the pointer on Windows.
+    if time.monotonic() < _edge_ignore_until:
         return
 
     threshold = int(CONFIG.get("edge_threshold", 3))
@@ -370,9 +378,10 @@ def _place_cursor_at_peer_edge(edge: str, fraction: float) -> None:
 def _handle_activate_windows(msg: dict) -> None:
     """Mac is sending input to Windows now."""
     log.info("[STATE] WINDOWS_ACTIVE")
-    global _edge_sent
+    global _edge_sent, _edge_ignore_until
     with _edge_lock:
         _edge_sent = False   # fresh start -- reset debounce
+        _edge_ignore_until = time.monotonic() + 0.75
     position = msg.get("position", 0.5)
     if isinstance(position, (int, float)) and not isinstance(position, bool) \
             and 0.0 <= position <= 1.0:

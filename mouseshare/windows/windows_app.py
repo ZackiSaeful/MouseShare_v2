@@ -319,17 +319,21 @@ def _on_mouse_move(x: int, y: int) -> None:
 
         log.info("[EDGE] Windows %s edge detected at x=%d y=%d", edge, x, y)
 
-        # Immediately mark inactive (prevents further edge sends)
-        with STATE.lock:
-            STATE.active = False
-
         # Preserve relative position when returning to a different-sized display.
         along_start = top if edge in ("left", "right") else left
         along_extent = height if edge in ("left", "right") else width
         along = y if edge in ("left", "right") else x
         fraction = (along - along_start) / max(1, along_extent - 1)
         fraction = max(0.0, min(1.0, fraction))
-        _net_send({"type": "edge", "edge": edge, "position": fraction})
+        if not _net_send({"type": "edge", "edge": edge, "position": fraction}):
+            # Keep Windows active and allow a later edge event to retry. The
+            # Mac restores its cursor when the receive loop detects disconnect.
+            with _edge_lock:
+                _edge_sent = False
+            log.warning("[EDGE] Could not send return handoff; keeping Windows active")
+            return
+        with STATE.lock:
+            STATE.active = False
         _update_tray()
 
     else:

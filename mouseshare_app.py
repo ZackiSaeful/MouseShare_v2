@@ -119,7 +119,10 @@ class MousehareApp:
         self.mac_position_var = tk.StringVar(
             value=self.settings.get("mac_position", "left"))
         self.status_var = tk.StringVar(value="Disconnected · Ready to start")
-        self.show_token = tk.BooleanVar(value=False)
+        self.field_visibility = {
+            "ip": True, "port": True, "token": False,
+            "settings_port": True, "settings_token": False,
+        }
         self.mac_position_selector = None
         self.network_mac_position_selector = None
         self.mac_position_hint = None
@@ -205,15 +208,29 @@ class MousehareApp:
                         background=p["panel2"], foreground=p["text"],
                         arrowcolor=p["accent"], bordercolor=p["line"],
                         lightcolor=p["line"], darkcolor=p["line"], padding=7)
-        style.map("Mousehare.TCombobox", fieldbackground=[("readonly", p["field"])],
-                  foreground=[("readonly", p["text"])])
+        style.map(
+            "Mousehare.TCombobox",
+            fieldbackground=[("readonly", p["field"]), ("focus", p["field"]),
+                             ("pressed", p["field"]), ("active", p["field"])],
+            foreground=[("readonly", p["text"]), ("focus", p["text"])],
+            background=[("disabled", p["panel"]), ("pressed", p["panel2"]),
+                        ("active", p["panel2"]), ("readonly", p["panel2"])],
+            arrowcolor=[("disabled", p["disabled"]), ("pressed", p["accent_hi"]),
+                        ("active", p["accent_hi"]), ("readonly", p["accent"])],
+            bordercolor=[("focus", p["accent"])],
+            lightcolor=[("focus", p["accent"])],
+            darkcolor=[("focus", p["accent"])],
+        )
         style.configure("Mousehare.Readonly.TEntry", fieldbackground=p["field"],
                         foreground=p["text"], insertcolor=p["text"],
                         bordercolor=p["line"], lightcolor=p["line"],
                         darkcolor=p["line"], padding=8, relief="flat")
         style.map("Mousehare.Readonly.TEntry",
                   fieldbackground=[("readonly", p["field"])],
-                  foreground=[("readonly", p["text"])])
+                  foreground=[("readonly", p["text"])],
+                  bordercolor=[("focus", p["accent"])],
+                  lightcolor=[("focus", p["accent"])],
+                  darkcolor=[("focus", p["accent"])])
         style.configure("Mousehare.Vertical.TScrollbar", background=p["panel2"],
                         troughcolor=p["bg"], bordercolor=p["line"],
                         arrowcolor=p["muted"], lightcolor=p["panel2"],
@@ -233,12 +250,18 @@ class MousehareApp:
             background=[("disabled", p["panel"]), ("pressed", p["line"]),
                         ("active", p["line"])],
             foreground=[("disabled", p["disabled"]), ("active", p["text"])],
+            # Clam draws its default keyboard focus as a black dotted border
+            # through the `alternate` state. Blend that border into this
+            # button's surface so clicks never leave a stray dotted rectangle.
+            bordercolor=[("focus", p["accent"]), ("alternate", p["panel2"])],
+            lightcolor=[("focus", p["accent"])],
+            darkcolor=[("focus", p["accent"])],
         )
         style.configure(
             "Mousehare.Primary.TButton",
             background=p["accent"], foreground="#18130F",
             bordercolor=p["accent"], lightcolor=p["accent"],
-            darkcolor=p["accent"], focuscolor=p["accent_hi"],
+            darkcolor=p["accent"], focuscolor=p["accent"],
             padding=(16, 10), relief="flat",
             font=("Arial", 10, "bold"),
         )
@@ -247,42 +270,54 @@ class MousehareApp:
             background=[("disabled", p["panel2"]), ("pressed", p["accent_hi"]),
                         ("active", p["accent_hi"])],
             foreground=[("disabled", p["disabled"]), ("active", "#18130F")],
+            bordercolor=[("focus", p["accent"]), ("alternate", p["accent"])],
+            lightcolor=[("focus", p["accent"])],
+            darkcolor=[("focus", p["accent"])],
         )
         style.configure(
             "Mousehare.Nav.TButton",
             background=p["panel"], foreground=p["text"],
             bordercolor=p["panel"], lightcolor=p["panel"],
-            darkcolor=p["panel"], padding=(14, 12), anchor="w",
+            darkcolor=p["panel"], focuscolor=p["accent"], padding=(14, 12), anchor="w",
             relief="flat", font=("Arial", 11),
         )
         style.map(
             "Mousehare.Nav.TButton",
             background=[("pressed", p["line"]), ("active", p["panel2"])],
             foreground=[("active", p["text"])],
+            bordercolor=[("focus", p["accent"]), ("alternate", p["panel"])],
+            lightcolor=[("focus", p["accent"])],
+            darkcolor=[("focus", p["accent"])],
         )
         style.configure(
             "Mousehare.NavSelected.TButton",
             background=p["accent"], foreground="#18130F",
             bordercolor=p["accent"], lightcolor=p["accent"],
-            darkcolor=p["accent"], padding=(14, 12), anchor="w",
+            darkcolor=p["accent"], focuscolor=p["accent"], padding=(14, 12), anchor="w",
             relief="flat", font=("Arial", 11, "bold"),
         )
         style.map(
             "Mousehare.NavSelected.TButton",
             background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"])],
             foreground=[("active", "#18130F")],
+            bordercolor=[("focus", p["accent"]), ("alternate", p["accent"])],
+            lightcolor=[("focus", p["accent"])],
+            darkcolor=[("focus", p["accent"])],
         )
         style.configure(
             "Mousehare.Small.TButton",
             background=p["panel2"], foreground=p["text"],
             bordercolor=p["line"], lightcolor=p["panel2"],
-            darkcolor=p["line"], padding=(10, 4), relief="flat",
+            darkcolor=p["line"], focuscolor=p["accent"], padding=(10, 4), relief="flat",
             font=("Arial", 8, "bold"),
         )
         style.map(
             "Mousehare.Small.TButton",
             background=[("pressed", p["line"]), ("active", p["line"])],
             foreground=[("active", p["text"])],
+            bordercolor=[("focus", p["accent"]), ("alternate", p["panel2"])],
+            lightcolor=[("focus", p["accent"])],
+            darkcolor=[("focus", p["accent"])],
         )
 
     def _build_shell(self) -> None:
@@ -292,7 +327,8 @@ class MousehareApp:
         shell = tk.Frame(self.root, bg=p["bg"])
         shell.pack(fill="both", expand=True)
         self.sidebar = tk.Frame(shell, width=190, bg=p["panel"],
-                                highlightbackground=p["line"], highlightthickness=1)
+                                highlightbackground=p["line"], highlightcolor=p["line"],
+                                highlightthickness=1)
         self.sidebar.pack(side="left", fill="y", padx=(14, 0), pady=14)
         self.sidebar.pack_propagate(False)
         logo = tk.Canvas(self.sidebar, width=48, height=48, bg=p["panel"],
@@ -354,7 +390,8 @@ class MousehareApp:
     def _draw_status_bar(self) -> None:
         p = self.palette
         self.status_bar = tk.Frame(self.content_area, bg=p["panel"],
-                                   highlightbackground=p["line"], highlightthickness=1)
+                                   highlightbackground=p["line"], highlightcolor=p["line"],
+                                   highlightthickness=1)
         self.status_bar.pack(side="bottom", fill="x", pady=(14, 0))
         self.status_dot = tk.Canvas(self.status_bar, width=16, height=16, bg=p["panel"],
                                     highlightthickness=0)
@@ -415,7 +452,7 @@ class MousehareApp:
     def _panel(self, parent, **pack_options):
         p = self.palette
         frame = tk.Frame(parent, bg=p["panel"], highlightbackground=p["line"],
-                         highlightthickness=1)
+                         highlightcolor=p["line"], highlightthickness=1)
         frame.pack(**pack_options)
         return frame
 
@@ -442,13 +479,61 @@ class MousehareApp:
                          highlightcolor=p["accent"], font=("Courier New", 11))
         return entry
 
-    def _readonly_entry(self, parent, variable, width=24):
+    def _readonly_entry(self, parent, variable, width=24, show=None):
         p = self.palette
         return tk.Entry(parent, textvariable=variable, width=width,
-                        state="readonly", readonlybackground=p["field"],
+                        state="readonly", show=show, readonlybackground=p["field"],
                         fg=p["text"], relief="flat", highlightthickness=1,
                         highlightbackground=p["line"], highlightcolor=p["accent"],
                         font=("Courier New", 11))
+
+    def _draw_reveal_icon(self, button, visible: bool) -> None:
+        button.delete("all")
+        p = self.palette
+        button.create_line(
+            4, 15, 9, 9, 16, 6, 23, 9, 28, 15, 23, 21, 16, 24, 9, 21, 4, 15,
+            smooth=True, splinesteps=24, fill=p["text"], width=1.8,
+        )
+        button.create_oval(13, 12, 19, 18, outline=p["text"], fill=p["text"], width=1)
+        if not visible:
+            button.create_line(6, 25, 26, 5, fill=p["accent_hi"], width=2)
+
+    def _reveal_button(self, parent, field_key: str, entry):
+        p = self.palette
+        button = tk.Canvas(
+            parent, width=32, height=30, bg=p["panel2"],
+            highlightthickness=0, takefocus=True, cursor="hand2",
+        )
+        self._draw_reveal_icon(button, self.field_visibility.get(field_key, False))
+
+        def toggle(_event=None):
+            visible = not self.field_visibility.get(field_key, False)
+            self.field_visibility[field_key] = visible
+            entry.configure(show="" if visible else "•")
+            self._draw_reveal_icon(button, visible)
+            return "break"
+
+        button.bind("<Button-1>", toggle)
+        button.bind("<Return>", toggle)
+        button.bind("<space>", toggle)
+        button.bind("<Enter>", lambda _event: button.configure(bg=p["line"]))
+        button.bind("<Leave>", lambda _event: button.configure(bg=p["panel2"]))
+        return button
+
+    def _field_with_reveal(self, parent, field_key: str, variable, width=24,
+                           readonly=False):
+        p = self.palette
+        holder = tk.Frame(parent, bg=p["panel"])
+        visible = self.field_visibility.get(field_key, False)
+        show = "" if visible else "•"
+        if readonly:
+            entry = self._readonly_entry(holder, variable, width=width, show=show)
+        else:
+            entry = self._entry(holder, variable, width=width, show=show)
+        entry.pack(side="left", fill="x", expand=True, ipady=8)
+        reveal = self._reveal_button(holder, field_key, entry)
+        reveal.pack(side="left", padx=(5, 0))
+        return holder, entry, reveal
 
     def _render_connect(self) -> None:
         p = self.palette
@@ -490,10 +575,15 @@ class MousehareApp:
                      font=("Arial", 9)).grid(row=0, column=1, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Pairing Key", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
-            self._entry(fields, self.ip_var).grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self._entry(fields, self.port_var, width=8).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self.token_entry = self._entry(fields, self.token_var, show="*")
-            self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
+            ip_field, _ip_entry, _ip_eye = self._field_with_reveal(
+                fields, "ip", self.ip_var)
+            ip_field.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0))
+            port_field, _port_entry, _port_eye = self._field_with_reveal(
+                fields, "port", self.port_var, width=8)
+            port_field.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0))
+            token_field, self.token_entry, self.token_reveal_button = self._field_with_reveal(
+                fields, "token", self.token_var)
+            token_field.grid(row=1, column=2, sticky="ew", pady=(5, 0))
         else:
             self.ip_var.set(self.local_ip)
             tk.Label(fields, text="Local IP", bg=p["panel"], fg=p["muted"],
@@ -502,18 +592,16 @@ class MousehareApp:
                      font=("Arial", 9)).grid(row=0, column=1, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Pairing Key", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
-            self._readonly_entry(fields, self.ip_var).grid(
-                row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8
-            )
-            self._entry(fields, self.port_var, width=8).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self.token_entry = self._entry(fields, self.token_var, show="*", state="readonly")
-            self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
+            ip_field, _ip_entry, _ip_eye = self._field_with_reveal(
+                fields, "ip", self.ip_var, readonly=True)
+            ip_field.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0))
+            port_field, _port_entry, _port_eye = self._field_with_reveal(
+                fields, "port", self.port_var, width=8)
+            port_field.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0))
+            token_field, self.token_entry, self.token_reveal_button = self._field_with_reveal(
+                fields, "token", self.token_var, readonly=True)
+            token_field.grid(row=1, column=2, sticky="ew", pady=(5, 0))
             self.token_var.set(self.settings["server_token"])
-        self.show_token_button = ttk.Button(
-            fields, text="Show", command=self._toggle_token_visibility,
-            style="Mousehare.Small.TButton", cursor="hand2",
-        )
-        self.show_token_button.grid(row=2, column=2, sticky="e", pady=(5, 0))
 
         if ROLE == "client":
             pairing_actions = tk.Frame(details_inner, bg=p["panel"])
@@ -556,7 +644,6 @@ class MousehareApp:
         )
         self._sync_connection_controls()
 
-        self._refresh_token_visibility()
         if ROLE == "client":
             permissions = tk.Frame(details_inner, bg=p["panel"])
             permissions.pack(anchor="w", pady=(8, 0))
@@ -583,6 +670,7 @@ class MousehareApp:
         fg = "#18130F" if selected else (p["text"] if enabled else p["disabled"])
         dim = "#4B2E17" if selected else (p["muted"] if enabled else p["disabled"])
         frame = tk.Frame(parent, bg=bg, highlightbackground=p["accent"] if selected else p["line"],
+                         highlightcolor=p["accent"] if selected else p["line"],
                          highlightthickness=1)
         tk.Label(frame, text=title.upper(), bg=bg, fg=fg,
                  font=("Arial", 11, "bold")).pack(anchor="w", padx=13, pady=(9, 0))
@@ -660,12 +748,14 @@ class MousehareApp:
         self._title("Settings", "Network, pairing and appearance preferences")
         body = tk.Frame(self.content, bg=p["bg"])
         body.pack(fill="both", expand=True)
-        nav = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightthickness=1)
+        nav = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"],
+                       highlightcolor=p["line"], highlightthickness=1)
         nav.pack(side="left", fill="y", padx=(0, 12))
         for section in ("General", "Network", "Security", "Appearance"):
             self._button(nav, section, lambda value=section: self._set_settings_section(value),
                          primary=section == self.settings_section, fill="x", padx=8, pady=4)
-        self.settings_content = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightthickness=1)
+        self.settings_content = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"],
+                                         highlightcolor=p["line"], highlightthickness=1)
         self.settings_content.pack(side="left", fill="both", expand=True)
         self._draw_settings_section()
 
@@ -685,7 +775,9 @@ class MousehareApp:
             tk.Label(wrap, text="Default port", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 10)).pack(anchor="w")
             self.settings_port_var = tk.StringVar(value=str(self._current_port()))
-            self._entry(wrap, self.settings_port_var, width=12).pack(anchor="w", pady=(5, 12), ipady=7)
+            port_field, _port_entry, _port_eye = self._field_with_reveal(
+                wrap, "settings_port", self.settings_port_var, width=12)
+            port_field.pack(anchor="w", pady=(5, 12))
             self._button(wrap, "Save default port", self._save_general_settings,
                          primary=True, anchor="w")
             tk.Label(wrap, text="Mousehare's existing TCP protocol uses port 5555 by default.",
@@ -776,14 +868,10 @@ class MousehareApp:
                              anchor="w", pady=(0, 16))
             if ROLE == "server":
                 self.settings_token_var = tk.StringVar(value=self.settings["server_token"])
-                self.settings_key_entry = self._entry(
-                    wrap, self.settings_token_var, width=44, show="*", state="readonly")
-                self.settings_key_entry.pack(anchor="w", ipady=7)
-                self.settings_key_show = tk.BooleanVar(value=False)
-                tk.Checkbutton(wrap, text="Show pairing key", variable=self.settings_key_show,
-                               command=self._toggle_settings_key, bg=p["panel"], fg=p["muted"],
-                               selectcolor=p["field"], activebackground=p["panel"],
-                               activeforeground=p["text"], font=("Arial", 9)).pack(anchor="w", pady=(5, 0))
+                key_field, self.settings_key_entry, self.settings_key_eye = self._field_with_reveal(
+                    wrap, "settings_token", self.settings_token_var, width=44,
+                    readonly=True)
+                key_field.pack(anchor="w", fill="x")
                 self._button(wrap, "Regenerate pairing key", self._regenerate_token,
                              primary=True, anchor="w", pady=(12, 0))
             else:
@@ -985,23 +1073,6 @@ class MousehareApp:
         tk.Label(self.content, text="Mousehare uses 4-byte framed TCP transport with encrypted, sequence-checked messages. Default port: 5555.",
                  bg=p["bg"], fg=p["muted"], font=("Arial", 9), wraplength=650,
                  justify="left").pack(anchor="w", pady=6)
-
-    def _refresh_token_visibility(self) -> None:
-        token_entry = getattr(self, "token_entry", None)
-        if token_entry is not None:
-            token_entry.configure(show="" if self.show_token.get() else "*")
-        show_button = getattr(self, "show_token_button", None)
-        if show_button is not None:
-            show_button.configure(text="Hide" if self.show_token.get() else "Show")
-
-    def _toggle_token_visibility(self) -> None:
-        self.show_token.set(not self.show_token.get())
-        self._refresh_token_visibility()
-
-    def _toggle_settings_key(self) -> None:
-        entry = getattr(self, "settings_key_entry", None)
-        if entry is not None:
-            entry.configure(show="" if self.settings_key_show.get() else "*")
 
     @staticmethod
     def _parse_connection_details(value: str) -> tuple[str, int, str] | None:

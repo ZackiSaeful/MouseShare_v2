@@ -94,6 +94,17 @@ except ImportError as _e:
     sys.exit(1)
 
 try:
+    from AppKit import (
+        NSApplicationActivateIgnoringOtherApps,
+        NSRunningApplication,
+        NSWorkspace,
+    )
+except ImportError as _e:
+    print(f"[FATAL] Cannot import AppKit: {_e}")
+    print("        pip install pyobjc-framework-Cocoa")
+    sys.exit(1)
+
+try:
     import pystray
     from PIL import Image, ImageDraw
 except ImportError as _e:
@@ -412,32 +423,72 @@ def _main_display_geometry() -> tuple[float, float, float, float]:
 
 def _hide_cursor() -> None:
     if not STATE._cursor_hid:
-        CGDisplayHideCursor(CGMainDisplayID())
-        STATE._cursor_hid = True
-        log.debug("[CURSOR] Hidden")
+        result = int(CGDisplayHideCursor(CGMainDisplayID()))
+        if result == 0:
+            STATE._cursor_hid = True
+            log.info("[CURSOR] Hidden (CGDisplayHideCursor=%d)", result)
+        else:
+            log.error("[CURSOR] Hide failed (CGDisplayHideCursor=%d)", result)
 
 
 def _show_cursor() -> None:
     if STATE._cursor_hid:
-        CGDisplayShowCursor(CGMainDisplayID())
-        STATE._cursor_hid = False
-        log.debug("[CURSOR] Shown")
+        result = int(CGDisplayShowCursor(CGMainDisplayID()))
+        if result == 0:
+            STATE._cursor_hid = False
+            log.info("[CURSOR] Shown (CGDisplayShowCursor=%d)", result)
+        else:
+            log.error("[CURSOR] Show failed (CGDisplayShowCursor=%d)", result)
 
 
 def _dissociate_mouse() -> None:
     """Detach physical mouse movement from the on-screen cursor position."""
     if not STATE._dissoc:
-        CGAssociateMouseAndMouseCursorPosition(False)
-        STATE._dissoc = True
-        log.debug("[CURSOR] Mouse dissociated from cursor")
+        result = int(CGAssociateMouseAndMouseCursorPosition(False))
+        if result == 0:
+            STATE._dissoc = True
+            log.info("[CURSOR] Mouse dissociated (CGAssociate=%d)", result)
+        else:
+            log.error("[CURSOR] Mouse dissociation failed (CGAssociate=%d)", result)
 
 
 def _associate_mouse() -> None:
     """Re-attach physical mouse movement to the on-screen cursor."""
     if STATE._dissoc:
-        CGAssociateMouseAndMouseCursorPosition(True)
-        STATE._dissoc = False
-        log.debug("[CURSOR] Mouse re-associated with cursor")
+        result = int(CGAssociateMouseAndMouseCursorPosition(True))
+        if result == 0:
+            STATE._dissoc = False
+            log.info("[CURSOR] Mouse re-associated (CGAssociate=%d)", result)
+        else:
+            log.error("[CURSOR] Mouse re-association failed (CGAssociate=%d)", result)
+
+
+def _with_mousehare_foreground(action) -> bool:
+    """Run cursor-control APIs while Mousehare is frontmost, then restore focus."""
+    current = NSRunningApplication.currentApplication()
+    previous = NSWorkspace.sharedWorkspace().frontmostApplication()
+    current_pid = int(current.processIdentifier())
+    previous_pid = int(previous.processIdentifier()) if previous is not None else None
+    was_frontmost = previous_pid == current_pid
+
+    if not was_frontmost:
+        if not current.activateWithOptions_(NSApplicationActivateIgnoringOtherApps):
+            log.error("[CURSOR] Could not activate Mousehare for cursor control")
+            return False
+        deadline = time.monotonic() + 1.0
+        while not current.isActive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not current.isActive():
+            log.error("[CURSOR] Mousehare did not become the foreground app")
+            if previous is not None and not previous.isTerminated():
+                previous.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+            return False
+
+    try:
+        return bool(action())
+    finally:
+        if not was_frontmost and previous is not None and not previous.isTerminated():
+            previous.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
 
 
 def _release_mac_mouse_buttons() -> None:
@@ -467,8 +518,12 @@ def _release_mac_mouse_buttons() -> None:
 def restore_mac_safe() -> None:
     """Always-safe cleanup: re-associate mouse and show cursor.
     Call on disconnect, exception, or quit to avoid stuck invisible cursor."""
-    _associate_mouse()
-    _show_cursor()
+    def restore() -> bool:
+        _associate_mouse()
+        _show_cursor()
+        return not STATE._dissoc and not STATE._cursor_hid
+
+    _with_mousehare_foreground(restore)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -609,6 +664,7 @@ _transition_lock = threading.Lock()
 
 def switch_to_windows() -> None:
     """Atomic transition from the selected Mac edge to Windows."""
+    global _switching_to_win
     with _transition_lock:
         with STATE._lock:
             if STATE.dev  != DevState.MAC_ACTIVE:
@@ -637,12 +693,8 @@ def switch_to_windows() -> None:
         }):
             _on_conn_lost()
             return
-        STATE.set_windows_active()
-        # Step 2: reset the early-suppression flag (state is now authoritative)
-        global _switching_to_win
-        _switching_to_win = False
-        # Step 3: park the cursor on the selected edge before entering
-        # delta-only mode.
+        # Park, detach, and hide while Mousehare is briefly frontmost. macOS
+        # may reject these CoreGraphics operations when this app is in back.
         left, top, width, height = _main_display_geometry()
         if mac_exit_edge in ("left", "right"):
             safe = max(int(top), min(int(_last_edge_coord), int(top + height - 1)))
@@ -652,11 +704,30 @@ def switch_to_windows() -> None:
             safe = max(int(left), min(int(_last_edge_coord), int(left + width - 1)))
             y = top + 5 if mac_exit_edge == "top" else top + height - 6
             point = (safe, y)
-        CGWarpMouseCursorPosition(point)
-        # Step 5: detach physical mouse from cursor (delta-only mode)
-        _dissociate_mouse()
-        # Step 6: hide cursor so it does not linger visibly on screen
-        _hide_cursor()
+
+        def prepare_cursor_for_windows() -> bool:
+            warp_result = int(CGWarpMouseCursorPosition(point))
+            if warp_result != 0:
+                log.error("[CURSOR] Edge warp failed (CGWarp=%d)", warp_result)
+                return False
+            _dissociate_mouse()
+            _hide_cursor()
+            return STATE._dissoc and STATE._cursor_hid
+
+        if not _with_mousehare_foreground(prepare_cursor_for_windows):
+            log.error("[EDGE] Cursor setup failed; cancelling Windows handoff")
+            _queue_remote_input({"type": "deactivate_windows"})
+            restore_mac_safe()
+            _switching_to_win = False
+            _notify_status(
+                "connected",
+                "macOS denied cursor control. Keep Mousehare open and retry the handoff.",
+            )
+            return
+
+        STATE.set_windows_active()
+        # Keep suppressing local input until cursor ownership is ready.
+        _switching_to_win = False
         # Forwarding is now handled automatically by the event tap callback
 
 
@@ -695,10 +766,18 @@ def switch_to_mac(windows_edge: str, position: float | None = None) -> None:
                 safe = max(int(left), min(int(_last_edge_coord), int(left + width - 1)))
                 y = top + 5 if mac_entry_edge == "top" else top + height - 6
                 point = (safe, y)
-            CGWarpMouseCursorPosition(point)
-            log.debug("[CURSOR] Warped to Mac %s edge at %s", mac_entry_edge, point)
-            _associate_mouse()
-            _show_cursor()
+            def restore_cursor_to_mac() -> bool:
+                warp_result = int(CGWarpMouseCursorPosition(point))
+                if warp_result != 0:
+                    log.error("[CURSOR] Mac edge warp failed (CGWarp=%d)", warp_result)
+                _associate_mouse()
+                _show_cursor()
+                log.debug("[CURSOR] Warped to Mac %s edge at %s", mac_entry_edge, point)
+                return not STATE._dissoc and not STATE._cursor_hid
+
+            if not _with_mousehare_foreground(restore_cursor_to_mac):
+                log.error("[EDGE] Cursor restore reported failure; retrying safe restore")
+                restore_mac_safe()
             STATE.set_mac_active()
         except Exception:
             log.exception("[EDGE] Could not complete Windows-to-Mac handoff")

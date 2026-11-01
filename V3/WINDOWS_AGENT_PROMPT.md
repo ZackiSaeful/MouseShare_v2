@@ -2,7 +2,15 @@
 
 Kamu adalah agent eksekusi Windows untuk Mousehare V3. Kerjakan hanya di folder `V3/` pada branch yang ditentukan; jangan ubah aplikasi V2 atau file Mac. Ikuti perintah PM berikut:
 
-1. Ambil branch `codex/mouseshare-core-refresh` terbaru dari repository. Buka `V3/README.md` dan file ini sebelum mengubah apa pun. V3 adalah aplikasi baru dengan protokol baru; jangan mencampur file V2.
+1. Sinkronkan branch dari repository:
+
+   ```powershell
+   git fetch origin
+   git switch codex/mouseshare-core-refresh
+   git pull --ff-only origin codex/mouseshare-core-refresh
+   ```
+
+   Jika branch belum ada di clone lokal, gunakan `git switch --track origin/codex/mouseshare-core-refresh`. Buka `V3/README.md` dan file ini sebelum mengubah apa pun. V3 adalah aplikasi baru dengan protokol baru; jangan mencampur file V2.
 2. Di PowerShell, jalankan `cd V3`, lalu `powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1` pada Windows 10/11 x64 dengan Python 3.12 dan Inno Setup 6.
 3. Pastikan hasilnya ada: `V3/dist/MousehareV3/MousehareV3.exe` dan `V3/release/MousehareV3-Setup-3.0.0.exe`. Jalankan executable, pilih **Start receiving**, catat LAN IP, lalu uji bind port TCP 5555.
 4. Bila ada sertifikat penerbit tepercaya yang disediakan organisasi, berikan thumbprint-nya ke skrip: `powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -CertificateThumbprint "THUMBPRINT"`. Jangan membuat atau mengklaim sertifikat self-signed menyelesaikan Smart App Control.

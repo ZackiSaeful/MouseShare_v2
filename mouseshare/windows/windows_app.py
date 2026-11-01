@@ -66,11 +66,30 @@ if sys.platform == "win32":
 # ── Logging ──────────────────────────────────────────────────────────────────
 
 def _setup_logging(debug: bool) -> None:
-    logging.basicConfig(
-        level=logging.DEBUG if debug else logging.INFO,
-        format="%(asctime)s %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    level = logging.DEBUG if debug else logging.INFO
+    fmt = "%(asctime)s [%(levelname)s] %(message)s"
+    handlers = [logging.StreamHandler(sys.stdout)]
+    try:
+        app_data = os.environ.get("APPDATA", "")
+        if app_data:
+            log_dir = Path(app_data) / "Mousehare"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_file = log_dir / "Mousehare.log"
+            from logging.handlers import RotatingFileHandler
+            fh = RotatingFileHandler(str(log_file), maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8")
+            fh.setLevel(level)
+            fh.setFormatter(logging.Formatter(fmt, "%H:%M:%S"))
+            handlers.append(fh)
+    except Exception:
+        pass
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    for h in list(root.handlers):
+        root.removeHandler(h)
+    for h in handlers:
+        h.setFormatter(logging.Formatter(fmt, "%H:%M:%S"))
+        root.addHandler(h)
 
 
 log = logging.getLogger(__name__)

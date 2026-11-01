@@ -1771,6 +1771,7 @@ class MousehareApp:
     def close(self) -> None:
         self._disconnect()
         self.root.destroy()
+        sys.exit(0)
 
 
 def main() -> None:

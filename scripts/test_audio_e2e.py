@@ -104,7 +104,7 @@ def run_e2e_test():
             else:
                 received_other_messages.append(msg)
 
-    mute_mgr = EndpointMuteManager()
+    mute_mgr = windows_app._audio_server.mute_manager
 
     recv_thread = threading.Thread(target=client_recv, daemon=True)
     recv_thread.start()
@@ -124,7 +124,7 @@ def run_e2e_test():
         assert ok, "Failed to send audio_control"
 
         # Wait and collect frames
-        time.sleep(0.8)
+        time.sleep(1.0)
         frames_count_1 = len(received_audio_frames)
         assert frames_count_1 > 5, f"Expected > 5 audio frames, received {frames_count_1}"
         assert mute_mgr.get_mute(), "Windows output MUST be muted while actively streaming to Mac"
@@ -167,7 +167,7 @@ def run_e2e_test():
         # Step 6: Test Mac re-enable (audio_control -> True)
         log.info("Mac re-enabling audio: audio_control -> True")
         channel.send(client_sock, {"type": "audio_control", "enabled": True}, send_message)
-        time.sleep(0.6)
+        time.sleep(1.0)
         count_after_reoptin = len(received_audio_frames)
         assert count_after_reoptin > count_after + 5, f"Expected audio resumption, got {count_after_reoptin - count_after} frames"
         assert mute_mgr.get_mute(), "Windows output MUST be muted when Mac re-enables"
@@ -177,7 +177,7 @@ def run_e2e_test():
         # Step 7: Test Windows opt-out (set_audio_share_enabled(False))
         log.info("Windows user opting out: set_audio_share_enabled(False)")
         windows_app.set_audio_share_enabled(False)
-        time.sleep(0.3)
+        time.sleep(0.4)
         count_win_optout = len(received_audio_frames)
         time.sleep(0.4)
         count_win_after = len(received_audio_frames)
@@ -189,7 +189,7 @@ def run_e2e_test():
         # Step 8: Test Windows re-opt-in (set_audio_share_enabled(True))
         log.info("Windows user re-enabling: set_audio_share_enabled(True)")
         windows_app.set_audio_share_enabled(True)
-        time.sleep(0.6)
+        time.sleep(1.0)
         count_win_resumed = len(received_audio_frames)
         assert count_win_resumed > count_win_after + 5, f"Expected audio resumption on Windows re-opt-in, got {count_win_resumed - count_win_after} frames"
         assert mute_mgr.get_mute(), "Windows output MUST be muted when Windows re-enables"

@@ -777,16 +777,6 @@ class MousehareApp:
                 justify="left"))
             self.mac_position_hint.pack(anchor="w", pady=(0, 10))
 
-            self.audio_share_var = tk.BooleanVar(
-                value=bool(self.settings.get("audio_share", False)))
-            audio_toggle = tk.Checkbutton(
-                details_inner, text="Play Windows audio on this Mac",
-                variable=self.audio_share_var, command=self._save_audio_preferences,
-                bg=p["panel"], fg=p["text"], selectcolor=p["field"],
-                activebackground=p["panel"], activeforeground=p["text"],
-                disabledforeground=p["disabled"], font=("Arial", 10, "bold"),
-            )
-            audio_toggle.pack(anchor="w", pady=(0, 10))
         else:
             server_actions = tk.Frame(details_inner, bg=p["panel"])
             server_actions.pack(fill="x", pady=(10, 8))
@@ -807,21 +797,6 @@ class MousehareApp:
                 justify="left"
             )).pack(anchor="w", pady=(4, 12))
 
-            self.audio_share_var = tk.BooleanVar(
-                value=bool(self.settings.get("audio_share", False)))
-            audio_toggle = tk.Checkbutton(
-                details_inner, text="Play audio on Mac only",
-                variable=self.audio_share_var, command=self._on_home_audio_toggle,
-                bg=p["panel"], fg=p["text"], selectcolor=p["field"],
-                activebackground=p["panel"], activeforeground=p["text"],
-                disabledforeground=p["disabled"], font=("Arial", 10, "bold"),
-            )
-            audio_toggle.pack(anchor="w", pady=(0, 2))
-            self.home_audio_status_label = tk.Label(
-                details_inner, text="", bg=p["panel"], fg=p["muted"],
-                font=("Arial", 9), justify="left"
-            )
-            self.home_audio_status_label.pack(anchor="w", pady=(0, 10))
 
         controls = tk.Frame(details_inner, bg=p["panel"])
         controls.pack(fill="x", pady=(0, 4))
@@ -1266,9 +1241,15 @@ class MousehareApp:
         self._save_settings()
         if hasattr(agent, "set_audio_share_enabled"):
             agent.set_audio_share_enabled(enabled)
+        elif hasattr(agent, "set_audio_share"):
+            vol = int(self.windows_audio_volume_var.get()) if hasattr(self, "windows_audio_volume_var") else None
+            agent.set_audio_share(enabled, vol)
         self._sync_audio_controls()
         state_str = "enabled" if enabled else "disabled"
         self._set_status(self.connection_status, f"Audio sharing {state_str}.")
+
+    def _on_home_audio_toggle(self) -> None:
+        self._on_audio_share_toggled()
 
     def _on_audio_gain_changed(self, val) -> None:
         try:

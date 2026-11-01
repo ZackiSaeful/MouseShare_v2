@@ -570,66 +570,14 @@ class MousehareApp:
         entry = tk.Entry(parent, textvariable=variable, width=width, show=show,
                          state=state, bg=p["field"], fg=p["text"], insertbackground=p["accent"],
                          disabledbackground=p["field"], disabledforeground=p["muted"],
+                         readonlybackground=p["field"],
+                         selectbackground=p["line"], selectforeground=p["text"],
                          relief="flat", highlightthickness=1, highlightbackground=p["line"],
                          highlightcolor=p["accent"], font=("Courier New", 11))
         return entry
 
     def _readonly_entry(self, parent, variable, width=24, show=None):
         return self._entry(parent, variable, width=width, show=show, state="readonly")
-
-    def _draw_reveal_icon(self, button, visible: bool) -> None:
-        button.delete("all")
-        p = self.palette
-        button.create_line(
-            4, 15, 9, 9, 16, 6, 23, 9, 28, 15, 23, 21, 16, 24, 9, 21, 4, 15,
-            smooth=True, splinesteps=24, fill=p["text"], width=1.8,
-        )
-        button.create_oval(13, 12, 19, 18, outline=p["text"], fill=p["text"], width=1)
-        if not visible:
-            button.create_line(6, 25, 26, 5, fill=p["accent_hi"], width=2)
-
-    def _reveal_button(self, parent, field_key: str, entry):
-        p = self.palette
-        button = tk.Canvas(
-            parent, width=32, height=30, bg=p["panel2"],
-            highlightthickness=0, takefocus=True, cursor="hand2",
-        )
-        self._draw_reveal_icon(button, self.field_visibility.get(field_key, False))
-
-        def toggle(_event=None):
-            visible = not self.field_visibility.get(field_key, False)
-            self.field_visibility[field_key] = visible
-            entry.configure(show="" if visible else "•")
-            self._draw_reveal_icon(button, visible)
-            return "break"
-
-        button.bind("<Button-1>", toggle)
-        button.bind("<Return>", toggle)
-        button.bind("<space>", toggle)
-        button.bind("<Enter>", lambda _event: button.configure(bg=p["line"]))
-        button.bind("<Leave>", lambda _event: button.configure(bg=p["panel2"]))
-        return button
-
-    def _field_with_reveal(self, parent, field_key: str, variable, width=24,
-                           readonly=False):
-        p = self.palette
-        holder = tk.Frame(parent, bg=p["panel"])
-        visible = self.field_visibility.get(field_key, False)
-        show = "" if visible else "•"
-        if readonly:
-            entry = self._readonly_entry(holder, variable, width=width, show=show)
-        else:
-            entry = self._entry(holder, variable, width=width, show=show)
-        entry.pack(side="left", fill="x", expand=True, ipady=8)
-        reveal = self._reveal_button(holder, field_key, entry)
-        reveal.pack(side="left", padx=(5, 0))
-        return holder, entry, reveal
-        p = self.palette
-        return tk.Entry(parent, textvariable=variable, width=width,
-                        state="readonly", show=show, readonlybackground=p["field"],
-                        fg=p["text"], relief="flat", highlightthickness=1,
-                        highlightbackground=p["line"], highlightcolor=p["accent"],
-                        font=("Courier New", 11))
 
     def _draw_reveal_icon(self, button, visible: bool) -> None:
         button.delete("all")
@@ -736,14 +684,14 @@ class MousehareApp:
                      font=("Arial", 9)).grid(row=0, column=1, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Pairing Key", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
-            ip_field, _ip_entry, _ip_eye = self._field_with_reveal(
-                fields, "ip", self.ip_var, readonly=True)
+            ip_field, self.ip_entry, _ip_eye = self._field_with_reveal(
+                fields, "ip", self.ip_var)
             ip_field.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0))
             port_field, _port_entry, _port_eye = self._field_with_reveal(
                 fields, "port", self.port_var, width=8)
             port_field.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0))
             token_field, self.token_entry, self.token_reveal_button = self._field_with_reveal(
-                fields, "token", self.token_var, readonly=True)
+                fields, "token", self.token_var)
             token_field.grid(row=1, column=2, sticky="ew", pady=(5, 0))
             self.token_var.set(self.settings["server_token"])
 
@@ -1565,6 +1513,9 @@ class MousehareApp:
                     "allow_legacy_protocol": bool(self.settings.get("allow_legacy_protocol", False)),
                     "debug": False}
         host = self.ip_var.get().strip()
+        if not host:
+            host = self.local_ip
+            self.ip_var.set(host)
         try:
             ipaddress.IPv4Address(host)
         except ipaddress.AddressValueError:

@@ -31,7 +31,7 @@ The profile is intentionally not stored in this repository. A DMG built without
 both variables is a local-test artifact and must not be presented as an
 installable public release.
 
-If `MACOS_CODESIGN_IDENTITY` is omitted, the script uses an ad-hoc signature for local testing. macOS can treat each rebuilt ad-hoc app as a different code identity, so Accessibility and Input Monitoring approvals may need to be removed and granted again for the current copy in `/Applications`. A stable Developer ID signature keeps the app identity consistent across rebuilds; public distribution still needs notarization and stapling.
+If `MACOS_CODESIGN_IDENTITY` is omitted, the script uses an ad-hoc signature with an explicit stable bundle identifier for local testing. When moving from an older build, remove the old Mousehare entries from Accessibility and Input Monitoring and add the current `/Applications/Mousehare.app` once. Later local rebuilds retain that designated requirement. This does not make the app trusted by Gatekeeper; public distribution still requires Developer ID signing, notarization, and stapling.
 
 When permissions appear enabled but Mousehare still reports them denied, use the exact bundle path shown in the app's error message. Quit other Mousehare copies, remove stale Mousehare entries from Accessibility and Input Monitoring, then add the current bundle from that path. Launch only the installed copy from `/Applications/Mousehare.app`; running another copy from `dist/` can use a different macOS privacy identity.
 

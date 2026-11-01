@@ -98,6 +98,7 @@ def _running_app_path() -> str:
 
 def input_permission_diagnostic(*, request_access: bool = False) -> dict[str, object]:
     """Read TCC state for the exact bundle that owns this running process."""
+    _setup_logging(bool(CONFIG.get("debug", False)))
     report: dict[str, object] = {"app_path": _running_app_path(), "log_path": str(diagnostic_log_path()),
                                  "accessibility": None, "input_monitoring": None}
     if not QUARTZ_AVAILABLE:
@@ -108,15 +109,19 @@ def input_permission_diagnostic(*, request_access: bool = False) -> dict[str, ob
         monitoring = bool(CGPreflightListenEventAccess())
         if request_access:
             if not accessibility:
-                CGRequestPostEventAccess()
+                report["accessibility_request"] = bool(CGRequestPostEventAccess())
             if not monitoring:
-                CGRequestListenEventAccess()
+                report["input_monitoring_request"] = bool(CGRequestListenEventAccess())
             accessibility = bool(CGPreflightPostEventAccess())
             monitoring = bool(CGPreflightListenEventAccess())
         report["accessibility"] = accessibility
         report["input_monitoring"] = monitoring
     except Exception as exc:
         report["error"] = str(exc)
+    log.info("[PERMISSION] app_path=%s Accessibility=%s InputMonitoring=%s request_access=%s",
+             report["app_path"], report["accessibility"], report["input_monitoring"], request_access)
+    if report.get("error"):
+        log.warning("[PERMISSION] TCC diagnostic error: %s", report["error"])
     return report
 
 
@@ -186,7 +191,8 @@ class MacBackend:
                                          ("Input Monitoring", "input_monitoring")) if report.get(key) is not True]
         if missing:
             _notify_status("error", f"macOS has not granted {' and '.join(missing)} to {report['app_path']}. "
-                           "Open the required settings, allow this exact app, then quit and reopen it. "
+                           "Remove stale Mousehare entries, add this exact app to both privacy lists, "
+                           "enable it, then quit and reopen it. "
                            f"Diagnostic log: {report['log_path']}")
             return False
         self.queue.start()

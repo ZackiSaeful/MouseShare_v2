@@ -291,7 +291,7 @@ Agar mouse dan keyboard fisik dapat ditangkap dan dialihkan ke Windows, macOS me
 ```
 
 > [!TIP]
-> **Penting Mengenai Rebuild Ad-hoc**: Jika Anda mengompilasi ulang aplikasi dengan signature ad-hoc (`-`), macOS menganggap binary baru tersebut memiliki identitas kode yang berbeda. Jika status izin tampak aktif tetapi aplikasi melaporkan *Permission Denied*, hapus entri Mousehare lama dengan menekan tombol minus `(-)` di pengaturan Accessibility & Input Monitoring, kemudian tambahkan kembali file `/Applications/Mousehare.app`.
+> **Penting Mengenai Build Ad-hoc**: Build lokal sekarang memakai bundle ID yang tetap sebagai identitas signature. Saat berpindah dari build lama, hapus entri Mousehare lama di Accessibility dan Input Monitoring, tambahkan ulang `/Applications/Mousehare.app`, lalu setujui izin untuk identitas build ini. Sesudah itu, build lokal berikutnya dengan bundle ID yang sama mempertahankan identitas izin. Build ad-hoc tetap belum dinotarize untuk distribusi publik.
 
 ---
 

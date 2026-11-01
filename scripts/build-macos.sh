@@ -44,7 +44,7 @@ PLIST="$APP/Contents/Info.plist"
   /usr/libexec/PlistBuddy -c 'Set :NSInputMonitoringUsageDescription Mousehare needs Input Monitoring permission to capture keyboard and mouse input.' "$PLIST"
 ENTITLEMENTS="$ROOT/Mousehare.entitlements"
 if [[ "$MACOS_CODESIGN_IDENTITY" == "-" ]]; then
-  echo "Signing ad hoc for local use. macOS privacy approvals may need to be renewed after a rebuild."
+  echo "Signing ad hoc for local use with a stable Mousehare bundle identity."
   # Sign embedded frameworks first without --deep (proper nested signing)
   find "$APP/Contents/Frameworks" -type f -perm +111 -exec codesign --force --sign - {} \; 2>/dev/null || true
   find "$APP/Contents/Frameworks" -name "*.dylib" -exec codesign --force --sign - {} \; 2>/dev/null || true
@@ -52,6 +52,7 @@ if [[ "$MACOS_CODESIGN_IDENTITY" == "-" ]]; then
   # Sign the main app bundle with entitlements
   codesign --force --deep --sign - \
     --entitlements "$ENTITLEMENTS" \
+    --requirements '=designated => identifier "com.mousehare.desktop"' \
     --identifier com.mousehare.desktop "$APP"
 else
   echo "Signing with: $MACOS_CODESIGN_IDENTITY"

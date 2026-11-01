@@ -17,6 +17,11 @@ import sys
 import threading
 import time
 
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("audio_e2e")
 
@@ -27,6 +32,7 @@ from mouseshare.secure_transport import (
 )
 from mouseshare.windows.protocol import recv_message, send_message
 from mouseshare.windows import windows_app
+from mouseshare.windows.audio_share import EndpointMuteManager
 
 TEST_PORT = 5566
 TEST_TOKEN = "test_audio_token_12345"
@@ -98,15 +104,19 @@ def run_e2e_test():
             else:
                 received_other_messages.append(msg)
 
+    mute_mgr = EndpointMuteManager()
+
     recv_thread = threading.Thread(target=client_recv, daemon=True)
     recv_thread.start()
 
     try:
         # Step 1: Initial state - Mac audio_control has NOT been sent yet.
-        # Ensure no audio frames are received yet.
+        # Ensure no audio frames are received yet, and Windows output is NOT muted.
         time.sleep(0.4)
         assert len(received_audio_frames) == 0, f"Expected 0 frames before opt-in, got {len(received_audio_frames)}"
-        log.info("[PASS 1] No audio transmitted before Mac audio_control.enabled=True.")
+        assert not mute_mgr.get_mute(), "Windows output must NOT be muted before streaming"
+        assert not windows_app._audio_server.is_muted_locally, "Audio server must not report muted locally before streaming"
+        log.info("[PASS 1] No audio transmitted and Windows unmuted before Mac audio_control.enabled=True.")
 
         # Step 2: Mac sends audio_control: enabled=True
         log.info("Mac enabling audio: audio_control -> True")
@@ -117,7 +127,9 @@ def run_e2e_test():
         time.sleep(0.8)
         frames_count_1 = len(received_audio_frames)
         assert frames_count_1 > 5, f"Expected > 5 audio frames, received {frames_count_1}"
-        log.info("[PASS 2] Audio streaming active. Received %d frames.", frames_count_1)
+        assert mute_mgr.get_mute(), "Windows output MUST be muted while actively streaming to Mac"
+        assert windows_app._audio_server.is_muted_locally, "Audio server must report muted locally"
+        log.info("[PASS 2] Audio streaming active and Windows local output muted. Received %d frames.", frames_count_1)
 
         # Step 3: Validate wire format on all received frames
         for idx, f in enumerate(received_audio_frames[:20]):
@@ -148,7 +160,9 @@ def run_e2e_test():
         count_after = len(received_audio_frames)
         # Should have stopped
         assert count_after - count_at_optout <= 1, f"Audio should have stopped: got {count_after - count_at_optout} new frames"
-        log.info("[PASS 5] Mac opt-out stopped audio promptly.")
+        assert not mute_mgr.get_mute(), "Windows output MUST be restored when Mac opts out"
+        assert not windows_app._audio_server.is_muted_locally
+        log.info("[PASS 5] Mac opt-out stopped audio promptly and restored local Windows output.")
 
         # Step 6: Test Mac re-enable (audio_control -> True)
         log.info("Mac re-enabling audio: audio_control -> True")
@@ -156,7 +170,9 @@ def run_e2e_test():
         time.sleep(0.6)
         count_after_reoptin = len(received_audio_frames)
         assert count_after_reoptin > count_after + 5, f"Expected audio resumption, got {count_after_reoptin - count_after} frames"
-        log.info("[PASS 6] Mac re-enable resumed audio stream cleanly.")
+        assert mute_mgr.get_mute(), "Windows output MUST be muted when Mac re-enables"
+        assert windows_app._audio_server.is_muted_locally
+        log.info("[PASS 6] Mac re-enable resumed audio stream cleanly and muted Windows output.")
 
         # Step 7: Test Windows opt-out (set_audio_share_enabled(False))
         log.info("Windows user opting out: set_audio_share_enabled(False)")
@@ -166,7 +182,9 @@ def run_e2e_test():
         time.sleep(0.4)
         count_win_after = len(received_audio_frames)
         assert count_win_after - count_win_optout <= 1, f"Audio should stop on Windows opt-out: got {count_win_after - count_win_optout} new frames"
-        log.info("[PASS 7] Windows opt-out stopped audio promptly.")
+        assert not mute_mgr.get_mute(), "Windows output MUST be restored when Windows opts out"
+        assert not windows_app._audio_server.is_muted_locally
+        log.info("[PASS 7] Windows opt-out stopped audio promptly and restored local Windows output.")
 
         # Step 8: Test Windows re-opt-in (set_audio_share_enabled(True))
         log.info("Windows user re-enabling: set_audio_share_enabled(True)")
@@ -174,7 +192,9 @@ def run_e2e_test():
         time.sleep(0.6)
         count_win_resumed = len(received_audio_frames)
         assert count_win_resumed > count_win_after + 5, f"Expected audio resumption on Windows re-opt-in, got {count_win_resumed - count_win_after} frames"
-        log.info("[PASS 8] Windows re-enable resumed audio stream cleanly.")
+        assert mute_mgr.get_mute(), "Windows output MUST be muted when Windows re-enables"
+        assert windows_app._audio_server.is_muted_locally
+        log.info("[PASS 8] Windows re-enable resumed audio stream cleanly and muted Windows output.")
 
         # Step 9: Disconnect under load
         log.info("Testing abrupt client disconnect under load while audio plays...")
@@ -182,7 +202,9 @@ def run_e2e_test():
         client_sock.close()
         time.sleep(0.4)
         assert not windows_app._audio_server.is_running, "Audio capture must stop on disconnect"
-        log.info("[PASS 9] Disconnect under load stopped audio workers promptly without crash.")
+        assert not mute_mgr.get_mute(), "Windows output MUST be restored on client disconnect"
+        assert not windows_app._audio_server.is_muted_locally
+        log.info("[PASS 9] Disconnect under load stopped audio workers promptly and restored local Windows output.")
 
     finally:
         receiver_stop.set()
@@ -193,7 +215,8 @@ def run_e2e_test():
         windows_app.stop_backend()
         time.sleep(0.3)
         assert not windows_app._audio_server.is_running
-        log.info("[PASS 10] Server backend stopped cleanly.")
+        assert not mute_mgr.get_mute(), "Windows output MUST be restored after backend stop"
+        log.info("[PASS 10] Server backend stopped cleanly and verified mute state.")
 
     print("\nALL 10 END-TO-END AUDIO SHARING TESTS PASSED SUCCESSFULLY!\n")
 

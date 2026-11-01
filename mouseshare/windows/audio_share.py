@@ -7,12 +7,26 @@ encrypted Mousehare SecureChannel.
 """
 from __future__ import annotations
 
+import atexit
 import base64
+import ctypes
 import logging
 import queue
 import socket
 import threading
 import time
+import uuid
+from ctypes import (
+    POINTER,
+    WINFUNCTYPE,
+    HRESULT,
+    byref,
+    c_int,
+    c_ubyte,
+    c_ulong,
+    c_ushort,
+    c_void_p,
+)
 from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
@@ -34,6 +48,187 @@ class AudioDeviceError(RuntimeError):
     """Raised when WASAPI loopback endpoint cannot be discovered or initialized."""
 
 
+class GUID(ctypes.Structure):
+    _fields_ = [
+        ("Data1", c_ulong),
+        ("Data2", c_ushort),
+        ("Data3", c_ushort),
+        ("Data4", c_ubyte * 8),
+    ]
+
+    def __init__(self, guid_str: str) -> None:
+        super().__init__()
+        u = uuid.UUID(guid_str)
+        self.Data1 = u.time_low
+        self.Data2 = u.time_mid
+        self.Data3 = u.time_hi_version
+        self.Data4 = (c_ubyte * 8)(*u.bytes[8:])
+
+
+CLSID_MMDeviceEnumerator = GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
+IID_IMMDeviceEnumerator = GUID("{A95664D2-9614-4F35-A746-DE8DB63617E6}")
+IID_IAudioEndpointVolume = GUID("{5CDF2C82-841E-4546-9722-0CF74078229A}")
+
+
+class EndpointMuteManager:
+    """Manages muting and restoring the Windows default render endpoint volume.
+
+    Guarantees:
+    - Never modifies master volume dB or scalar levels; only toggles hardware endpoint mute.
+    - Records the initial mute state before muting.
+    - Restores the exact initial mute state upon opt-out, disconnect, capture error, or exit.
+    - If Windows was already muted prior to routing, keeps Windows muted when routing ends.
+    - Thread-safe and idempotent.
+    - Registers an atexit hook as a failsafe against unexpected termination.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._is_muted_by_us: bool = False
+        self._initial_mute_state: bool = False
+        self._has_initial_state: bool = False
+        atexit.register(self.restore_mute)
+
+    @property
+    def is_muted_by_us(self) -> bool:
+        with self._lock:
+            return self._is_muted_by_us
+
+    def _get_endpoint_volume_interface(self):
+        """Acquire the IAudioEndpointVolume interface for default render endpoint.
+
+        Returns (endpoint_volume_ptr, vol_vtable, release_callback).
+        Caller MUST invoke release_callback() in a finally block.
+        """
+        ole32 = ctypes.oledll.ole32
+        hr_init = ole32.CoInitialize(None)
+
+        enumerator = c_void_p()
+        hr = ole32.CoCreateInstance(
+            byref(CLSID_MMDeviceEnumerator),
+            None,
+            1,  # CLSCTX_INPROC_SERVER
+            byref(IID_IMMDeviceEnumerator),
+            byref(enumerator),
+        )
+        if hr < 0 or not enumerator.value:
+            if hr_init in (0, 1):
+                ole32.CoUninitialize()
+            raise AudioDeviceError(f"CoCreateInstance(MMDeviceEnumerator) failed: {hex(hr)}")
+
+        enum_vt = ctypes.cast(enumerator, POINTER(POINTER(c_void_p))).contents
+        # Index 4: GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, IMMDevice **ppEndpoint)
+        GetDefaultAudioEndpoint = WINFUNCTYPE(
+            HRESULT, c_void_p, c_int, c_int, POINTER(c_void_p)
+        )(enum_vt[4])
+        # Index 2: Release
+        Release_enum = WINFUNCTYPE(c_ulong, c_void_p)(enum_vt[2])
+
+        device = c_void_p()
+        # 0 = eRender, 0 = eConsole (default system output)
+        hr = GetDefaultAudioEndpoint(enumerator, 0, 0, byref(device))
+        Release_enum(enumerator)
+        if hr < 0 or not device.value:
+            if hr_init in (0, 1):
+                ole32.CoUninitialize()
+            raise AudioDeviceError(f"GetDefaultAudioEndpoint failed: {hex(hr)}")
+
+        dev_vt = ctypes.cast(device, POINTER(POINTER(c_void_p))).contents
+        # Index 3: Activate(REFIID, DWORD, PROPVARIANT*, void**)
+        Activate = WINFUNCTYPE(
+            HRESULT, c_void_p, POINTER(GUID), c_ulong, c_void_p, POINTER(c_void_p)
+        )(dev_vt[3])
+        Release_dev = WINFUNCTYPE(c_ulong, c_void_p)(dev_vt[2])
+
+        endpoint_vol = c_void_p()
+        hr = Activate(device, byref(IID_IAudioEndpointVolume), 1 | 2 | 4 | 16, None, byref(endpoint_vol))
+        Release_dev(device)
+        if hr < 0 or not endpoint_vol.value:
+            if hr_init in (0, 1):
+                ole32.CoUninitialize()
+            raise AudioDeviceError(f"Activate(IAudioEndpointVolume) failed: {hex(hr)}")
+
+        vol_vt = ctypes.cast(endpoint_vol, POINTER(POINTER(c_void_p))).contents
+        Release_vol = WINFUNCTYPE(c_ulong, c_void_p)(vol_vt[2])
+
+        def release_all():
+            try:
+                Release_vol(endpoint_vol)
+            except Exception:
+                pass
+            if hr_init in (0, 1):
+                try:
+                    ole32.CoUninitialize()
+                except Exception:
+                    pass
+
+        return endpoint_vol, vol_vt, release_all
+
+    def get_mute(self) -> bool:
+        """Query current Windows endpoint mute state."""
+        vol, vol_vt, release_fn = self._get_endpoint_volume_interface()
+        try:
+            # Index 15: GetMute(BOOL *pbMute)
+            GetMute = WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_int))(vol_vt[15])
+            is_muted = c_int()
+            hr = GetMute(vol, byref(is_muted))
+            if hr < 0:
+                raise AudioDeviceError(f"GetMute failed: {hex(hr)}")
+            return bool(is_muted.value)
+        finally:
+            release_fn()
+
+    def set_mute(self, mute: bool) -> None:
+        """Set Windows endpoint mute state."""
+        vol, vol_vt, release_fn = self._get_endpoint_volume_interface()
+        try:
+            # Index 14: SetMute(BOOL bMute, LPCGUID pguidEventContext)
+            SetMute = WINFUNCTYPE(HRESULT, c_void_p, c_int, c_void_p)(vol_vt[14])
+            hr = SetMute(vol, 1 if mute else 0, None)
+            if hr < 0:
+                raise AudioDeviceError(f"SetMute failed: {hex(hr)}")
+        finally:
+            release_fn()
+
+    def mute_local_output(self) -> bool:
+        """Mute local Windows audio output if not already muted by us."""
+        with self._lock:
+            if self._is_muted_by_us:
+                return True
+            try:
+                current_mute = self.get_mute()
+                if not self._has_initial_state:
+                    self._initial_mute_state = current_mute
+                    self._has_initial_state = True
+                    log.info("[AUDIO-MUTE] Saved initial Windows audio mute state: %s", current_mute)
+
+                if not current_mute:
+                    self.set_mute(True)
+                    log.info("[AUDIO-MUTE] Local Windows audio output temporarily muted.")
+                else:
+                    log.info("[AUDIO-MUTE] Local Windows audio was already muted; leaving muted.")
+                self._is_muted_by_us = True
+                return True
+            except Exception as exc:
+                log.warning("[AUDIO-MUTE] Failed to mute local Windows audio: %s", exc)
+                return False
+
+    def restore_mute(self) -> None:
+        """Restore initial Windows audio endpoint mute state."""
+        with self._lock:
+            if not self._is_muted_by_us and not self._has_initial_state:
+                return
+            target_mute = self._initial_mute_state
+            self._is_muted_by_us = False
+            self._has_initial_state = False
+
+        try:
+            self.set_mute(target_mute)
+            log.info("[AUDIO-MUTE] Restored Windows audio mute state to initial: %s", target_mute)
+        except Exception as exc:
+            log.warning("[AUDIO-MUTE] Failed to restore Windows audio mute state: %s", exc)
+
+
 class AudioCaptureServer:
     """Manages WASAPI loopback audio capture and transmission over SecureChannel.
 
@@ -41,6 +236,8 @@ class AudioCaptureServer:
     - No audio device is opened or started on import or when disabled.
     - Captures system output mix only; never captures microphone.
     - Never changes Windows system or application volume.
+    - Mutes local Windows output only while actively routing audio to Mac.
+    - Restores Windows mute state promptly on stop, opt-out, disconnect, or exit.
     - Dedicated capture and send workers; never blocks mouse/keyboard injection.
     - Small bounded queue: drops stale frames on congestion.
     - Fails gracefully without crashing the server.
@@ -53,6 +250,7 @@ class AudioCaptureServer:
         self._send_thread: Optional[threading.Thread] = None
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=MAX_QUEUE_FRAMES)
         self._is_running = False
+        self._mute_manager = EndpointMuteManager()
 
         self._sock: Optional[socket.socket] = None
         self._channel = None
@@ -64,6 +262,14 @@ class AudioCaptureServer:
     def is_running(self) -> bool:
         with self._lock:
             return self._is_running and not self._stop_event.is_set()
+
+    @property
+    def is_muted_locally(self) -> bool:
+        return self._mute_manager.is_muted_by_us
+
+    @property
+    def mute_manager(self) -> EndpointMuteManager:
+        return self._mute_manager
 
     @property
     def device_name(self) -> str:
@@ -116,9 +322,10 @@ class AudioCaptureServer:
             return True
 
     def stop(self) -> None:
-        """Promptly stop audio capture and send workers."""
+        """Promptly stop audio capture and send workers and restore local audio."""
         with self._lock:
             if not self._is_running:
+                self._mute_manager.restore_mute()
                 return
             self._is_running = False
             self._stop_event.set()
@@ -133,6 +340,9 @@ class AudioCaptureServer:
         if snd_thread and snd_thread.is_alive() and snd_thread is not threading.current_thread():
             snd_thread.join(timeout=0.6)
 
+        # Promptly restore Windows endpoint volume mute state
+        self._mute_manager.restore_mute()
+
         with self._lock:
             self._capture_thread = None
             self._send_thread = None
@@ -146,7 +356,7 @@ class AudioCaptureServer:
                 except queue.Empty:
                     break
 
-        log.info("[AUDIO] Audio capture stopped.")
+        log.info("[AUDIO] Audio capture stopped and local audio restored.")
 
     def _notify(self, status: str, message: str) -> None:
         cb = self._status_cb
@@ -249,6 +459,9 @@ class AudioCaptureServer:
                 frames_per_buffer=SAMPLES_PER_FRAME_PER_CH,
             )
 
+            # Stream successfully opened: mute local Windows output so sound plays ONLY on Mac
+            self._mute_manager.mute_local_output()
+
             buffer = bytearray()
             while not self._stop_event.is_set():
                 try:
@@ -290,6 +503,7 @@ class AudioCaptureServer:
             self._notify("audio_device_error", f"Audio capture error: {exc}")
             self._stop_event.set()
         finally:
+            self._mute_manager.restore_mute()
             if stream is not None:
                 try:
                     stream.stop_stream()

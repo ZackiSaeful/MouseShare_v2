@@ -128,6 +128,27 @@ def set_audio_share_enabled(enabled: bool) -> None:
     _update_audio_capture_state()
 
 
+def get_audio_share_state() -> dict:
+    """Return snapshot of audio sharing state for UI synchronization."""
+    with STATE.lock:
+        sock = STATE.client_sock
+        channel = STATE.client_channel
+        mac_enabled = STATE.mac_audio_enabled
+
+    windows_enabled = bool(CONFIG.get("audio_share", False))
+    is_secure = channel is not None and getattr(channel, "is_encrypted", False)
+    is_active = _audio_server.is_running
+    is_muted = _audio_server.is_muted_locally
+    return {
+        "windows_enabled": windows_enabled,
+        "mac_enabled": mac_enabled,
+        "is_connected": sock is not None,
+        "is_secure": is_secure,
+        "is_active": is_active,
+        "is_muted": is_muted,
+    }
+
+
 def _handle_audio_control(msg: dict) -> None:
     """Process audio_control messages from Mac client."""
     enabled = msg.get("enabled")

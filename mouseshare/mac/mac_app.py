@@ -576,6 +576,24 @@ def set_audio_share_enabled(enabled: bool) -> None:
     _sync_audio_state()
 
 
+def get_audio_share_state() -> dict:
+    """Return snapshot of audio sharing state for UI synchronization."""
+    with STATE._lock:
+        sock = STATE._sock
+        channel = STATE._channel
+    is_secure = channel is not None and getattr(channel, "is_encrypted", False)
+    mac_enabled = bool(CONFIG.get("audio_share", False))
+    is_running = _audio_playback is not None and _audio_playback.is_running
+    return {
+        "windows_enabled": mac_enabled,
+        "mac_enabled": mac_enabled,
+        "is_connected": sock is not None,
+        "is_secure": is_secure,
+        "is_active": is_running,
+        "is_muted": False,
+    }
+
+
 def set_audio_gain(gain: int) -> None:
     CONFIG["audio_gain"] = max(0, min(100, int(gain)))
     if _audio_playback is not None:

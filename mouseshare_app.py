@@ -127,6 +127,14 @@ class MousehareApp:
             value=self.settings.get("mac_position", "left"))
         self.status_var = tk.StringVar(value="Disconnected · Ready to start")
         self.show_token = tk.BooleanVar(value=False)
+        self.audio_share_var = tk.BooleanVar(
+            value=bool(self.settings.get("audio_share", False))
+        )
+        self.audio_gain_var = tk.IntVar(
+            value=int(self.settings.get("audio_gain", 100))
+        )
+        self.home_audio_status_label = None
+        self.settings_audio_status_label = None
         self.icon_eye_open = None
         self.icon_eye_closed = None
         self._wrapping_labels: list[tuple[tk.Label, int]] = []
@@ -143,6 +151,7 @@ class MousehareApp:
         self._configure_ttk()
         self._build_shell()
         self._show_page("connect")
+        self._sync_audio_controls()
         self.root.after(120, self._poll_events)
         self.root.bind_all("<MouseWheel>", self._on_mousewheel)
         self.root.bind_all("<Button-4>", self._on_mousewheel)
@@ -549,6 +558,8 @@ class MousehareApp:
         self.mac_position_selector = None
         self.network_mac_position_selector = None
         self.mac_position_hint = None
+        self.home_audio_status_label = None
+        self.settings_audio_status_label = None
         self._wrapping_labels = []
         self._settings_wrapping_labels = []
         for child in self.root.winfo_children():
@@ -561,6 +572,7 @@ class MousehareApp:
         else:
             self._render_about()
         self._refresh_status_visual()
+        self._sync_audio_controls()
 
     def _title(self, title: str, subtitle: str) -> None:
         p = self.palette
@@ -850,6 +862,67 @@ class MousehareApp:
                          lambda: self._open_macos_privacy("Privacy_ListenEvent"),
                          side="left", padx=(8, 9), pady=6)
 
+        # ── Audio Routing Control Panel (Home Page) ──
+        audio_panel = self._panel(self.content, fill="x", pady=(13, 0))
+        audio_inner = tk.Frame(audio_panel, bg=p["panel"])
+        audio_inner.pack(fill="x", padx=18, pady=15)
+
+        self._section_label(audio_inner, "Audio Routing")
+
+        audio_title = ("Play audio on Mac only" if ROLE == "server"
+                       else "Receive Windows audio")
+        home_audio_toggle = tk.Checkbutton(
+            audio_inner,
+            text=audio_title,
+            variable=self.audio_share_var,
+            bg=p["panel"], fg=p["text"],
+            selectcolor=p["field"],
+            activebackground=p["panel"],
+            activeforeground=p["text"],
+            disabledforeground=p["disabled"],
+            font=("Arial", 10, "bold"),
+            justify="left", anchor="w",
+            command=self._on_audio_share_toggled,
+        )
+        home_audio_toggle.pack(anchor="w", pady=(8, 3))
+        self._wrap_label(home_audio_toggle, pad=48)
+
+        self.home_audio_status_label = tk.Label(
+            audio_inner,
+            text="",
+            bg=p["panel"],
+            font=("Arial", 9, "bold"),
+            justify="left", anchor="w",
+        )
+        self.home_audio_status_label.pack(anchor="w", pady=(0, 6))
+
+        desc = (
+            "When active and Mac has opted in, Windows system output mix is captured "
+            "and played on Mac only, and local Windows output is temporarily muted. "
+            "Windows output is immediately restored when audio stops, Mac disconnects, or the app closes. "
+            "Microphone audio is never captured. Default OFF."
+            if ROLE == "server" else
+            "Receives Windows system audio stream over the authenticated, encrypted connection. "
+            "Off by default. Both computers must enable audio sharing."
+        )
+        self._wrap_label(tk.Label(
+            audio_inner, text=desc,
+            bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left",
+        )).pack(anchor="w", pady=(0, 4))
+
+        if ROLE == "client":
+            slider_frame = tk.Frame(audio_inner, bg=p["panel"])
+            slider_frame.pack(anchor="w", pady=(6, 0))
+            tk.Label(slider_frame, text="Windows audio stream volume:", bg=p["panel"],
+                     fg=p["muted"], font=("Arial", 9)).pack(side="left", padx=(0, 8))
+            tk.Scale(
+                slider_frame, from_=0, to=100, orient="horizontal",
+                variable=self.audio_gain_var, bg=p["panel"], fg=p["text"],
+                troughcolor=p["field"], highlightthickness=0,
+                activebackground=p["accent_hi"], length=180,
+                command=lambda val: self._on_audio_gain_changed(val),
+            ).pack(side="left")
+
     def _mode_card(self, parent, title, subtitle, selected, enabled=True):
         p = self.palette
         bg = p["accent"] if selected else (p["panel2"] if enabled else p["panel"])
@@ -981,26 +1054,32 @@ class MousehareApp:
             # Audio sharing compact controls
             tk.Label(wrap, text="Audio sharing", bg=p["panel"], fg=p["text"],
                      font=("Arial", 12, "bold")).pack(anchor="w", pady=(22, 6))
-            self.audio_share_var = tk.BooleanVar(
-                value=bool(self.settings.get("audio_share", False))
-            )
-            audio_text = ("Share Windows system audio with Mac" if ROLE == "server"
+            audio_text = ("Play audio on Mac only" if ROLE == "server"
                           else "Receive Windows system audio on Mac")
             audio_toggle = tk.Checkbutton(
                 wrap, text=audio_text,
                 variable=self.audio_share_var, bg=p["panel"], fg=p["text"],
                 selectcolor=p["field"], activebackground=p["panel"],
                 activeforeground=p["text"], disabledforeground=p["disabled"],
-                font=("Arial", 10), justify="left", anchor="w",
+                font=("Arial", 10, "bold"), justify="left", anchor="w",
                 command=self._on_audio_share_toggled,
             )
-            audio_toggle.pack(anchor="w", pady=(0, 4))
+            audio_toggle.pack(anchor="w", pady=(0, 3))
             self._settings_wrap_label(audio_toggle, pad=48)
 
-            desc = ("Copies Windows system output mix to the paired Mac client over the authenticated, "
-                    "encrypted connection (WASAPI loopback). Does not mute or alter Windows master volume—"
-                    "sound continues playing normally on Windows. Off by default; microphone audio is never captured. "
-                    "Requires both computers to enable audio sharing."
+            self.settings_audio_status_label = tk.Label(
+                wrap,
+                text="",
+                bg=p["panel"],
+                font=("Arial", 9, "bold"),
+                justify="left", anchor="w",
+            )
+            self.settings_audio_status_label.pack(anchor="w", pady=(0, 4))
+
+            desc = ("When active and Mac has opted in, Windows system output mix is captured "
+                    "and played on Mac only, and local Windows output is temporarily muted. "
+                    "Windows output is immediately restored when audio stops, Mac disconnects, or the app closes. "
+                    "Microphone audio is never captured. Default OFF; requires both computers to enable audio sharing."
                     if ROLE == "server" else
                     "Receives Windows system audio stream over the authenticated, encrypted connection. "
                     "Off by default. Both computers must enable audio sharing.")
@@ -1144,12 +1223,67 @@ class MousehareApp:
                 bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
             )).pack(anchor="w")
 
+    def _get_audio_status_info(self) -> tuple[str, str]:
+        """Return (status_text, color_key) for audio routing status."""
+        enabled = bool(self.audio_share_var.get())
+        if not enabled:
+            if ROLE == "server":
+                return ("• Off · Audio plays on Windows", "muted")
+            else:
+                return ("• Off · Audio playback disabled", "muted")
+
+        state = {}
+        if hasattr(agent, "get_audio_share_state"):
+            try:
+                state = agent.get_audio_share_state()
+            except Exception:
+                state = {}
+
+        is_connected = state.get("is_connected", False) or (self.connection_status == "connected")
+        is_secure = state.get("is_secure", False)
+        is_active = state.get("is_active", False)
+        mac_enabled = state.get("mac_enabled", False)
+
+        if ROLE == "server":
+            if not is_connected:
+                return ("• Enabled · Waiting for Mac to connect · Windows sound normal", "accent_hi")
+            if not is_secure:
+                return ("• Enabled · Waiting for secure session · Windows sound normal", "accent_hi")
+            if not mac_enabled:
+                return ("• Enabled · Waiting for Mac to opt in · Windows sound normal", "accent_hi")
+            if is_active:
+                return ("• Active · Routing audio to Mac only · Windows output muted", "green")
+            return ("• Enabled · Starting audio capture · Windows sound normal", "accent_hi")
+        else:
+            if not is_connected:
+                return ("• Enabled · Waiting for Windows server to connect", "accent_hi")
+            if not is_secure:
+                return ("• Enabled · Waiting for secure session", "accent_hi")
+            if is_active:
+                return ("• Active · Receiving Windows audio stream", "green")
+            return ("• Enabled · Ready to receive audio", "accent_hi")
+
+    def _sync_audio_controls(self) -> None:
+        """Update text and colors of audio status indicators on Home and Settings."""
+        text, color_key = self._get_audio_status_info()
+        p = self.palette
+        fg_color = p.get(color_key, p["accent_hi"])
+
+        lbl_home = getattr(self, "home_audio_status_label", None)
+        if lbl_home is not None and lbl_home.winfo_exists():
+            lbl_home.configure(text=text, fg=fg_color)
+
+        lbl_settings = getattr(self, "settings_audio_status_label", None)
+        if lbl_settings is not None and lbl_settings.winfo_exists():
+            lbl_settings.configure(text=text, fg=fg_color)
+
     def _on_audio_share_toggled(self) -> None:
         enabled = bool(self.audio_share_var.get())
         self.settings["audio_share"] = enabled
         self._save_settings()
         if hasattr(agent, "set_audio_share_enabled"):
             agent.set_audio_share_enabled(enabled)
+        self._sync_audio_controls()
         state_str = "enabled" if enabled else "disabled"
         self._set_status(self.connection_status, f"Audio sharing {state_str}.")
 

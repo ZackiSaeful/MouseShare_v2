@@ -235,7 +235,7 @@ bash scripts/build-macos.sh
 
 ### Build Deliverable di Windows (.exe Installer via Inno Setup)
 
-Skrip otomatis [scripts/build-windows.ps1](file:///Users/zackisaefulbahri/Pemograman/MouseShare%20v2/scripts/build-windows.ps1) menangani pembuatan executable dan setup wizard di Windows:
+Skrip otomatis [scripts/build-windows.ps1](scripts/build-windows.ps1) menangani pembuatan executable dan setup wizard di Windows:
 
 1. Membuat virtual environment terisolasi di `.build\venv-windows`.
 2. Menghasilkan icon aplikasi Windows (`.build\icons\mouseshare.ico`).
@@ -304,7 +304,8 @@ Agar mouse dan keyboard fisik dapat ditangkap dan dialihkan ke Windows, macOS me
 
 ### Konfigurasi Windows Firewall & SmartScreen
 
-- **Windows SmartScreen**: Jika muncul jendela biru *"Windows protected your PC"*, klik tulisan **More info**, kemudian klik tombol **Run anyway**.
+- **Windows Smart App Control**: Dialog *"Smart App Control blocked an app that may be unsafe"* tidak menyediakan tombol **Run anyway** dan tidak dapat di-*allowlist* per aplikasi. Ini terjadi bila installer/binary belum memiliki signature dari penerbit tepercaya. Untuk pengembangan di PC sendiri, jalankan dari source/venv; untuk distribusi, rilis harus ditandatangani memakai certificate authority dalam Microsoft Trusted Root Program atau Microsoft Artifact Signing. Sertifikat self-signed dari skrip build hanya cocok untuk pengembangan internal dan tidak akan membuat installer tepercaya di PC pengguna lain.
+- **Windows SmartScreen**: Jika yang muncul adalah jendela *"Windows protected your PC"* (bukan Smart App Control), pengguna yang telah memverifikasi asal file dapat memilih **More info → Run anyway**. Signature penerbit tepercaya yang konsisten membantu membangun reputasi, namun rilis baru masih dapat menampilkan peringatan pada awal distribusi.
 - **Windows Defender Firewall**: Saat pertama kali menjalankan Server, Windows akan menampilkan peringatan keamanan firewall. Centang opsi **Private networks (Jaringan Privat / Rumah / Kantor)** dan klik **Allow access**.
   *(Port default yang digunakan adalah TCP 5555).*
 

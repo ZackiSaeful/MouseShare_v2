@@ -18,6 +18,19 @@ For a stable signing identity, install the publisher's **Developer ID Applicatio
 MACOS_CODESIGN_IDENTITY="Developer ID Application: Publisher Name (TEAMID)" bash scripts/build-macos.sh
 ```
 
+For a distributable DMG, save App Store Connect credentials in a `notarytool`
+keychain profile, then submit and staple the generated DMG during the build:
+
+```sh
+MACOS_CODESIGN_IDENTITY="Developer ID Application: Publisher Name (TEAMID)" \
+MACOS_NOTARY_PROFILE="mousehare-notary" \
+bash scripts/build-macos.sh
+```
+
+The profile is intentionally not stored in this repository. A DMG built without
+both variables is a local-test artifact and must not be presented as an
+installable public release.
+
 If `MACOS_CODESIGN_IDENTITY` is omitted, the script uses an ad-hoc signature for local testing. macOS can treat each rebuilt ad-hoc app as a different code identity, so Accessibility and Input Monitoring approvals may need to be removed and granted again for the current copy in `/Applications`. A stable Developer ID signature keeps the app identity consistent across rebuilds; public distribution still needs notarization and stapling.
 
 When permissions appear enabled but Mousehare still reports them denied, use the exact bundle path shown in the app's error message. Quit other Mousehare copies, remove stale Mousehare entries from Accessibility and Input Monitoring, then add the current bundle from that path. Launch only the installed copy from `/Applications/Mousehare.app`; running another copy from `dist/` can use a different macOS privacy identity.
@@ -30,7 +43,23 @@ Requirements: Windows 10/11 x64, Python 3.12, and Inno Setup 6. The Windows bina
 powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
 ```
 
+For a machine-local development build, add `-DevelopmentCertificate`; this
+creates a self-signed certificate for inspection/testing on the build machine:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -DevelopmentCertificate
+```
+
+For a public installer, put the trusted code-signing certificate (including its
+private key) in `Cert:\CurrentUser\My` and pass its thumbprint:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -CertificateThumbprint "THUMBPRINT"
+```
+
 The script creates a windowed `dist/Mousehare/` application and compiles `release/Mousehare-Setup-1.0.0.exe`. The installer is per-user (`PrivilegesRequired=lowest`) and creates a Start menu shortcut plus an optional desktop shortcut. Runtime Python and libraries are included in the PyInstaller output.
+
+The default script produces an unsigned developer build. A self-signed certificate is for local development only; it cannot make a public installer acceptable to Windows Smart App Control. For a distributable release, sign the installer and every shipped executable/DLL/PYD with a certificate from a CA in the Microsoft Trusted Root Program or Microsoft Artifact Signing, using one stable publisher identity. Verify the final installer on a clean Windows 11 machine with Smart App Control enabled.
 
 ## Verification checklist
 

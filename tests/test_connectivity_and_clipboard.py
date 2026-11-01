@@ -2,6 +2,7 @@ import unittest
 import socket
 import threading
 import time
+from unittest.mock import patch
 
 from mouseshare.secure_transport import (
     PROTOCOL_VERSION,
@@ -169,6 +170,49 @@ class TestConnectivityAndClipboard(unittest.TestCase):
         # Entry on left edge should have x inset >= 14
         self.assertGreaterEqual(x, 14)
         self.assertAlmostEqual(frac, 0.5, delta=0.01)
+
+    def test_windows_activation_sends_ack(self):
+        """A new Windows session starts remote control in a guarded state."""
+        import mouseshare.windows.windows_app as win_app
+
+        backend = win_app.WindowsBackend({"edge_threshold": 3})
+        backend.mac_position = "left"
+        fake_user32 = type("User32", (), {"SetCursorPos": staticmethod(lambda _x, _y: False)})()
+        fake_windll = type("WinDLL", (), {"user32": fake_user32})()
+        with patch.object(win_app.ctypes, "windll", fake_windll, create=True), \
+             patch.object(backend, "_send", return_value=True) as send:
+            backend._activate({"type": "activate_windows", "position": 0.5})
+
+        self.assertTrue(backend.active)
+        self.assertFalse(backend.return_armed)
+        self.assertGreater(backend.activation_guard_until, time.monotonic())
+        send.assert_called_once_with({
+            "type": "activation_ack",
+            "active": True,
+            "cursor_positioned": False,
+            "edge": "left",
+            "position": 0.5,
+        })
+
+    def test_windows_return_edge_requires_move_away_then_physical_return(self):
+        import mouseshare.windows.windows_app as win_app
+
+        backend = win_app.WindowsBackend({"edge_threshold": 3})
+        backend.active = True
+        backend.mac_position = "left"
+        backend.activation_guard_until = 0.0
+        backend.injection_guard_until = 0.0
+        bounds = (0, 0, 1920, 1080)
+        with patch.object(win_app, "_virtual_screen_bounds", return_value=bounds), \
+             patch.object(backend, "_send", return_value=True) as send:
+            backend._on_mouse_move(1, 540)      # at entry edge: still disarmed
+            self.assertFalse(backend.return_armed)
+            backend._on_mouse_move(40, 540)     # user moved into desktop: arm return
+            self.assertTrue(backend.return_armed)
+            backend._on_mouse_move(1, 540)      # physical return crossing
+
+        self.assertFalse(backend.active)
+        send.assert_called_once_with({"type": "edge", "edge": "left", "position": 540 / 1079})
 
     def test_mac_activation_ack_handling(self):
         # Verify mac_handle_incoming handles activation_ack without error

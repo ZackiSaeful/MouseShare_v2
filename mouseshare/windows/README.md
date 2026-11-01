@@ -1,6 +1,14 @@
 # Mousehare — Windows Server Agent
 
-For end-user installation, use the Windows installer described in the project [README](../../README.md). The terminal workflow below is retained for contributors who need to debug the original agent directly.
+For end-user installation, use the Windows installer described in the project [README](../../README.md). For contributors, build from the repository root on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/build-windows.ps1
+```
+
+For a self-signed local test build, pass `-DevelopmentCertificate`. For public
+distribution, pass `-CertificateThumbprint` with a certificate from a trusted
+code-signing provider. The installer is written to `release/`.
 
 ## Overview
 Windows Agent is the TCP server.  It receives keyboard and mouse events from
@@ -39,24 +47,10 @@ sends this encrypted server-to-client message:
 `position` is the effective normalized location (or the requested location if
 placement failed). This is an additive protocol-v3 application message: the
 handshake, encryption, frame layout, and existing message fields are unchanged.
-An older Mac client ignores unknown message types, so it will not display this
-confirmation until its receiver is updated.
-
-For the Mac client to use the confirmation, add an `activation_ack` branch to
-`mouseshare/mac/mac_app.py::_handle_incoming`. Treat `active: true` and
-`cursor_positioned: true` as the server's confirmation; surface the failure
-fields if cursor placement failed. The current Mac switches to
-`WINDOWS_ACTIVE` optimistically in `switch_to_windows` and currently ignores
-this message, so that client-side status behavior still needs to be aligned.
-
-The Mac client also needs to use one coordinate unit consistently when it
-computes and warps edge positions. Its current handoff path combines
-`CGEventGetLocation` / `CGWarpMouseCursorPosition` global display coordinates
-with `CGDisplayPixelsWide` / `CGDisplayPixelsHigh` pixel dimensions. Use
-`CGDisplayBounds` dimensions for those global coordinates (or convert both
-positions and dimensions to pixels consistently) in the edge detection,
-fraction calculation, and return warp. The fraction message itself remains
-dimensionless, so this correction does not require a protocol-version bump.
+Older Mac clients ignore unknown message types. The current Mac client has an
+`activation_ack` branch in `mouseshare/mac/mac_app.py::_handle_incoming` and
+uses `CGDisplayBounds` coordinates consistently for edge fractions and cursor
+warps. The message remains additive to protocol v3.
 
 On return, Windows derives the fraction from the cursor's actual exit
 coordinate on the virtual desktop; it does not reuse a saved entry position.
@@ -71,11 +65,9 @@ generating a false return-to-Mac event.
 
 ## Installation
 
-```cmd
-cd windows
-py -m venv .venv
-.venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+```powershell
+py -3.12 -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-windows.txt
 ```
 
 > **Note**: Do NOT use `.venv\Scripts\activate` in PowerShell if execution
@@ -105,8 +97,8 @@ Settings → Security on both computers and reconnect both sides. Only text up t
 
 ## Running
 
-```cmd
-.venv\Scripts\python.exe windows_app.py
+```powershell
+.venv\Scripts\python.exe mouseshare_app.py
 ```
 
 A circle icon appears in the system tray:

@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 MACOS_CODESIGN_IDENTITY="${MACOS_CODESIGN_IDENTITY:--}"
+MACOS_NOTARY_PROFILE="${MACOS_NOTARY_PROFILE:-}"
 BUILD_ENV="$ROOT/.build/venv-macos"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -67,4 +68,18 @@ cp -R "$APP" "$STAGE/Mousehare.app"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -volname Mousehare -srcfolder "$STAGE" -ov -format UDZO \
   "$ROOT/release/Mousehare-macos-$ARCH.dmg"
-echo "Built $ROOT/release/Mousehare-macos-$ARCH.dmg"
+DMG="$ROOT/release/Mousehare-macos-$ARCH.dmg"
+
+if [[ -n "$MACOS_NOTARY_PROFILE" ]]; then
+  if [[ "$MACOS_CODESIGN_IDENTITY" == "-" ]]; then
+    echo "MACOS_NOTARY_PROFILE requires a Developer ID Application signature." >&2
+    exit 1
+  fi
+  xcrun notarytool submit "$DMG" --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$DMG"
+  xcrun stapler validate "$DMG"
+  echo "Built, notarized, and stapled $DMG"
+else
+  echo "Built local-only DMG $DMG"
+  echo "For distributable installation, rebuild with MACOS_CODESIGN_IDENTITY and MACOS_NOTARY_PROFILE."
+fi

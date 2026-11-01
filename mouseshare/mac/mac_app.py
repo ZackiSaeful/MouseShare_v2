@@ -677,16 +677,20 @@ def _handle_event(proxy, event_type: int, event, refcon):
     Return *event* to pass through, or *None* to suppress from Mac apps."""
     global _prev_flags, _last_edge_coord, _switching_to_win
 
+    win = STATE.is_windows_active   # read once per event (atomic)
+    switching = _switching_to_win or _switching_to_mac
+
     if event_type in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
         # macOS can disable a tap after a timeout. Re-enable it immediately so
         # captured input does not start leaking to local applications.
         if _event_tap_ref is not None:
             log.warning("[EVENT TAP] macOS disabled the tap (type=%s); re-enabling", event_type)
             CGEventTapEnable(_event_tap_ref, True)
-        return event
+        # The event that reports a disabled tap is still delivered to us.
+        # Do not pass it to macOS while Windows owns the pointer, or that one
+        # event can make the local cursor appear/move alongside Windows.
+        return None if win or switching else event
 
-    win = STATE.is_windows_active   # read once per event (atomic)
-    switching = _switching_to_win or _switching_to_mac
     if _switching_to_mac:
         # Do not enqueue events after deactivate_windows in the ordered queue.
         return None

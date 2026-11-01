@@ -30,9 +30,12 @@ try:
         CGDisplayBounds,
         CGDisplayHideCursor,
         CGDisplayShowCursor,
+        CGEventCreateMouseEvent,
         CGEventGetFlags,
         CGEventGetIntegerValueField,
         CGEventGetLocation,
+        CGEventPost,
+        CGEventSetIntegerValueField,
         CGEventMaskBit,
         CGEventTapCreate,
         CGEventTapEnable,
@@ -61,11 +64,16 @@ try:
         kCGEventRightMouseDragged,
         kCGEventRightMouseUp,
         kCGEventScrollWheel,
+        kCGEventSourceUserData,
         kCGEventTapOptionDefault,
         kCGEventTapDisabledByTimeout,
         kCGEventTapDisabledByUserInput,
         kCGHeadInsertEventTap,
+        kCGHIDEventTap,
         kCGKeyboardEventKeycode,
+        kCGMouseButtonCenter,
+        kCGMouseButtonLeft,
+        kCGMouseButtonRight,
         kCGMouseEventDeltaX,
         kCGMouseEventDeltaY,
         kCGScrollWheelEventDeltaAxis1,
@@ -386,6 +394,9 @@ _last_edge_coord: int = 500
 # waiting for the async thread to call _dissociate_mouse() / _hide_cursor().
 _switching_to_win: bool = False
 _switching_to_mac: bool = False
+_held_mouse_buttons: set[str] = set()
+_held_mouse_lock = threading.Lock()
+_HANDOFF_RELEASE_MARKER = 0x4D534852
 
 
 def _main_display_geometry() -> tuple[float, float, float, float]:
@@ -427,6 +438,30 @@ def _associate_mouse() -> None:
         CGAssociateMouseAndMouseCursorPosition(True)
         STATE._dissoc = False
         log.debug("[CURSOR] Mouse re-associated with cursor")
+
+
+def _release_mac_mouse_buttons() -> None:
+    """End any local drag before transferring the pointer to Windows."""
+    button_specs = {
+        "left": (kCGEventLeftMouseUp, kCGMouseButtonLeft),
+        "right": (kCGEventRightMouseUp, kCGMouseButtonRight),
+        "middle": (kCGEventOtherMouseUp, kCGMouseButtonCenter),
+    }
+    with _held_mouse_lock:
+        held = set(_held_mouse_buttons)
+        _held_mouse_buttons.clear()
+    current_event = Quartz.CGEventCreate(None)
+    if current_event is None:
+        return
+    point = CGEventGetLocation(current_event)
+    for name in held:
+        event_type, button = button_specs[name]
+        event = CGEventCreateMouseEvent(None, event_type, point, button)
+        if event is not None:
+            CGEventSetIntegerValueField(event, kCGEventSourceUserData,
+                                        _HANDOFF_RELEASE_MARKER)
+            CGEventPost(kCGHIDEventTap, event)
+            log.info("[INPUT] Released local %s mouse button for Windows handoff", name)
 
 
 def restore_mac_safe() -> None:
@@ -584,6 +619,11 @@ def switch_to_windows() -> None:
         mac_exit_edge = opposite_edge(CONFIG.get("mac_position", "left"))
         log.info("[EDGE] Mac %s edge -- switching to Windows", mac_exit_edge)
 
+        # A local app may still own a Finder/form drag. It never receives the
+        # physical mouse-up after the handoff, so release it before suppressing
+        # the rest of the gesture on Mac.
+        _release_mac_mouse_buttons()
+
         # Step 1: queue activation before accepting movement input.  The same
         # ordered worker forwards later deltas, so Windows always activates
         # before it receives its first mouse movement.
@@ -679,6 +719,11 @@ def _handle_event(proxy, event_type: int, event, refcon):
 
     win = STATE.is_windows_active   # read once per event (atomic)
     switching = _switching_to_win or _switching_to_mac
+
+    # Let our synthetic mouse-up reach the local app even though this handoff
+    # has already started suppressing physical mouse events.
+    if int(CGEventGetIntegerValueField(event, kCGEventSourceUserData)) == _HANDOFF_RELEASE_MARKER:
+        return event
 
     if event_type in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
         # macOS can disable a tap after a timeout. Re-enable it immediately so
@@ -790,6 +835,12 @@ def _handle_event(proxy, event_type: int, event, refcon):
             }):
                 threading.Thread(target=_on_conn_lost, daemon=True).start()
             return None
+        if not switching:
+            with _held_mouse_lock:
+                if pressed:
+                    _held_mouse_buttons.add(btn)
+                else:
+                    _held_mouse_buttons.discard(btn)
         return None if switching else event
 
     # ── Scroll wheel ──────────────────────────────────────────────────────────

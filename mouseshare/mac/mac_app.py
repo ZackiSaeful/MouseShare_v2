@@ -552,8 +552,18 @@ def _release_mac_mouse_buttons() -> None:
             log.info("[INPUT] Released local %s mouse button for Windows handoff", name)
 
 
-def restore_mac_safe() -> None:
-    """Always-safe cleanup: show cursor after a handoff or disconnect."""
+def restore_mac_safe(force: bool = False) -> None:
+    """Always-safe cleanup: restore a usable local cursor after handoff loss."""
+    if force:
+        # A server can disappear between the handoff flags/state updates. In
+        # that case the tracked flag may lag the CoreGraphics hide count.
+        result = int(CGDisplayShowCursor(CGMainDisplayID()))
+        if result == 0:
+            STATE._cursor_hid = False
+            log.info("[CURSOR] Forced local restore (CGDisplayShowCursor=%d)", result)
+        else:
+            log.error("[CURSOR] Forced restore failed (CGDisplayShowCursor=%d)", result)
+        return
     _show_cursor()
 
 
@@ -849,7 +859,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
             ok = _queue_remote_input({"type": "key", "action": action,
                                       "key": {"kind": kind, "value": value}})
             if not ok:
-                threading.Thread(target=_on_conn_lost, daemon=True).start()
+                _schedule_connection_loss()
             return None   # suppress: key must NOT reach Mac apps
         return None if switching else event
 
@@ -871,7 +881,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
                         "action": act,
                         "key": {"kind": "special", "value": mod_name},
                     }):
-                        threading.Thread(target=_on_conn_lost, daemon=True).start()
+                        _schedule_connection_loss()
             return None   # suppress modifier events from Mac
         return None if switching else event
 
@@ -892,7 +902,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
                 if dx or dy:
                     log.debug("[MOUSE] dx=%d dy=%d -> Windows", dx, dy)
                     if not _queue_remote_input({"type": "mouse_move", "dx": dx, "dy": dy}):
-                        threading.Thread(target=_on_conn_lost, daemon=True).start()
+                        _schedule_connection_loss()
             return None   # suppress: cursor must not move on Mac
 
         # MAC_ACTIVE: detect the edge facing the Windows computer.
@@ -931,7 +941,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
             if not _queue_remote_input({
                 "type": "mouse_click", "button": btn, "pressed": pressed,
             }):
-                threading.Thread(target=_on_conn_lost, daemon=True).start()
+                _schedule_connection_loss()
             return None
         if not switching:
             with _held_mouse_lock:
@@ -947,7 +957,7 @@ def _handle_event(proxy, event_type: int, event, refcon):
             dy = int(CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1))
             dx = int(CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis2))
             if not _queue_remote_input({"type": "mouse_scroll", "dx": dx, "dy": dy}):
-                threading.Thread(target=_on_conn_lost, daemon=True).start()
+                _schedule_connection_loss()
             return None
         return None if switching else event
 
@@ -1073,42 +1083,99 @@ def _stop_event_tap() -> None:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _quit_event = threading.Event()
+_connection_loss_dispatch_lock = threading.Lock()
+_connection_loss_pending = False
+
+
+def _schedule_connection_loss(expected_sock=None) -> None:
+    """Collapse repeated event-tap failures into one recovery worker."""
+    global _connection_loss_pending
+    with _connection_loss_dispatch_lock:
+        if _connection_loss_pending:
+            return
+        _connection_loss_pending = True
+
+    def recover() -> None:
+        global _connection_loss_pending
+        try:
+            _on_conn_lost(expected_sock)
+        finally:
+            with _connection_loss_dispatch_lock:
+                _connection_loss_pending = False
+
+    threading.Thread(target=recover, daemon=True, name="ConnectionRecovery").start()
 
 
 def _on_conn_lost(expected_sock=None) -> None:
-    """Safe-fallback for unexpected TCP disconnect."""
-    if expected_sock is not None and STATE.sock is not expected_sock:
-        return
+    """Immediately restore local control, then clean up a failed session."""
+    global _switching_to_win, _switching_to_mac
     with STATE._lock:
+        active_sock = STATE._sock
+        if expected_sock is not None and active_sock is not expected_sock:
+            return
+        was_connected = STATE.conn != ConnState.DISCONNECTED
+        was_windows_active = STATE.dev == DevState.WINDOWS_ACTIVE
         channel = STATE._channel
+        STATE.conn = ConnState.DISCONNECTED
+        STATE.dev = DevState.MAC_ACTIVE
+        STATE._sock = None
+        STATE._channel = None
+
+    if not was_connected and not (was_windows_active or STATE._cursor_hid
+                                  or _switching_to_win or _switching_to_mac):
+        return
+
     if channel is not None and _input_queue is not None:
         _input_queue.discard_session(channel)
-    global _switching_to_win
     _switching_to_win = False
+    _switching_to_mac = False
     log.info("[NETWORK] Connection lost")
-    log.info("[STATE]   Resetting to MAC_ACTIVE (safe fallback)")
-    restore_mac_safe()     # show cursor, re-associate mouse -- always safe
+    log.info("[STATE]   Resetting to DISCONNECTED + MAC_ACTIVE (local fail-safe)")
+
+    # Restore local event delivery before socket/audio/clipboard cleanup, any
+    # of which may wait for a worker. This prevents a dead Windows peer from
+    # leaving the Mac event tap suppressing clicks and motion.
+    restore_mac_safe(force=was_windows_active or STATE._cursor_hid)
+    _update_tray()
+    _notify_status("connecting", "Windows disconnected. Restoring local control…")
+
+    if active_sock is not None:
+        try:
+            active_sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            active_sock.close()
+        except OSError:
+            pass
+
     _stop_clipboard_sync()
     _stop_audio_playback()
-    STATE.close_socket()
-    STATE.set_disconnected()
     _notify_status("connecting", "Connection lost. Reconnecting…")
 
 
 def _recv_loop(sock, channel) -> None:
     """Daemon thread: reads framed messages from Windows until connection closes."""
     log.info("[NETWORK] Receive loop started")
-    while not _quit_event.is_set():
-        msg = channel.receive(sock, recv_message)
-        if msg is None:
+    try:
+        while not _quit_event.is_set():
+            try:
+                msg = channel.receive(sock, recv_message)
+            except Exception:
+                log.exception("[NETWORK] Receive failed; restoring local control")
+                break
+            if msg is None:
+                break
+            try:
+                _handle_incoming(msg)
+            except Exception:
+                # A bad message must not kill the connection. A failure in
+                # the receive path itself, however, is handled by finally.
+                log.exception("[NETWORK] Error handling incoming message")
+    finally:
+        if not _quit_event.is_set():
             _on_conn_lost(sock)
-            return
-        try:
-            _handle_incoming(msg)
-        except Exception as exc:
-            # One bad message must NOT kill the connection
-            log.error("[NETWORK] Error handling message: %s", exc)
-    log.info("[NETWORK] Receive loop ended")
+        log.info("[NETWORK] Receive loop ended")
 
 
 def _handle_incoming(msg: dict) -> None:
@@ -1164,6 +1231,8 @@ def _connect_loop(generation: int | None = None) -> None:
     def still_current() -> bool:
         return generation == _backend_generation and not _quit_event.is_set()
 
+    retry_delay = 1.0
+
     while still_current() and not _event_tap_ready.is_set():
         if _event_tap_failed.is_set():
             return
@@ -1176,6 +1245,20 @@ def _connect_loop(generation: int | None = None) -> None:
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # Detect a powered-off or unreachable Windows host even when the
+            # TCP session was previously idle and no FIN/RST reaches the Mac.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            for option_name, value in (
+                ("TCP_KEEPALIVE", 5),    # seconds before first probe on macOS
+                ("TCP_KEEPINTVL", 2),    # probe interval
+                ("TCP_KEEPCNT", 3),      # fail after three unanswered probes
+            ):
+                option = getattr(socket, option_name, None)
+                if option is not None:
+                    try:
+                        s.setsockopt(socket.IPPROTO_TCP, option, value)
+                    except OSError:
+                        log.debug("[NETWORK] Could not set %s", option_name)
             s.settimeout(5.0)
             s.connect((host, port))
             if not still_current():
@@ -1198,6 +1281,7 @@ def _connect_loop(generation: int | None = None) -> None:
 
             log.info("[NETWORK] Handshake OK")
             STATE.set_connected(s, channel, clipboard_enabled)
+            connected_at = time.monotonic()
             if clipboard_enabled:
                 _start_clipboard_sync()
             if channel.is_encrypted:
@@ -1214,6 +1298,8 @@ def _connect_loop(generation: int | None = None) -> None:
             )
             recv_t.start()
             recv_t.join()   # blocks until connection is lost
+            if time.monotonic() - connected_at >= 15.0:
+                retry_delay = 1.0
 
         except HandshakeError as exc:
             log.error("[NETWORK] Secure pairing failed: %s", exc)
@@ -1235,8 +1321,10 @@ def _connect_loop(generation: int | None = None) -> None:
                 _notify_status("error", f"Could not connect to {host}:{port}: {exc}")
 
         if still_current():
-            log.info("[NETWORK] Reconnecting in 3 s...")
-            _quit_event.wait(3.0)
+            log.info("[NETWORK] Reconnecting in %.1f s...", retry_delay)
+            if _quit_event.wait(retry_delay):
+                break
+            retry_delay = min(15.0, retry_delay * 2.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

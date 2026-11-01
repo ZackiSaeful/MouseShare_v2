@@ -32,6 +32,7 @@ fi
   --paths "$ROOT" \
   --collect-all pystray \
   --collect-all cryptography \
+  --collect-all sounddevice \
   --hidden-import Quartz --hidden-import CoreFoundation --hidden-import AppKit \
   mouseshare_app.py
 

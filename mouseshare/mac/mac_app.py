@@ -1029,8 +1029,12 @@ def _handle_incoming(msg: dict) -> None:
         _apply_remote_clipboard(msg)
 
     elif msg_type == "audio_pcm":
-        if _audio_playback is not None and _audio_playback.is_running:
-            _audio_playback.feed_frame(msg.get("pcm", ""))
+        global _audio_playback
+        if _audio_playback is None or not _audio_playback.is_running:
+            if _audio_playback is None:
+                _audio_playback = AudioPlayback(CONFIG.get("audio_gain", 100))
+            _audio_playback.start()
+        _audio_playback.feed_frame(msg.get("pcm", ""))
 
     elif msg_type == "hello_error":
         log.error("[NETWORK] The Windows server rejected pairing.")

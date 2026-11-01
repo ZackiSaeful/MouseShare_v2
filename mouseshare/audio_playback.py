@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import array
 import base64
+import ctypes
 import logging
 import queue
+import sys
 import threading
 import time
 from typing import Optional
@@ -25,6 +27,130 @@ SAMPLES_PER_FRAME_PER_CH = int(SAMPLE_RATE * (FRAME_DURATION_MS / 1000.0))  # 96
 FRAME_BYTES = SAMPLES_PER_FRAME_PER_CH * CHANNELS * SAMPLE_WIDTH            # 3,840
 BASE64_FRAME_LEN = ((FRAME_BYTES + 2) // 3) * 4                              # 5,120
 MAX_PLAYBACK_QUEUE = 8
+
+
+def _create_macos_audio_queue_stream():
+    """Create a native macOS CoreAudio AudioQueue stream using ctypes (AudioToolbox framework)."""
+    try:
+        audio_toolbox = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox")
+    except Exception as exc:
+        log.warning("[AUDIO] Could not load AudioToolbox.framework: %s", exc)
+        return None
+
+    class AudioStreamBasicDescription(ctypes.Structure):
+        _fields_ = [
+            ("mSampleRate", ctypes.c_double),
+            ("mFormatID", ctypes.c_uint32),
+            ("mFormatFlags", ctypes.c_uint32),
+            ("mBytesPerPacket", ctypes.c_uint32),
+            ("mFramesPerPacket", ctypes.c_uint32),
+            ("mBytesPerFrame", ctypes.c_uint32),
+            ("mChannelsPerFrame", ctypes.c_uint32),
+            ("mBitsPerChannel", ctypes.c_uint32),
+            ("mReserved", ctypes.c_uint32),
+        ]
+
+    class AudioQueueBuffer(ctypes.Structure):
+        _fields_ = [
+            ("mAudioDataBytesCapacity", ctypes.c_uint32),
+            ("mAudioData", ctypes.c_void_p),
+            ("mAudioDataByteSize", ctypes.c_uint32),
+            ("mUserData", ctypes.c_void_p),
+            ("mPacketDescriptionCapacity", ctypes.c_uint32),
+            ("mPacketDescriptions", ctypes.c_void_p),
+            ("mPacketDescriptionCount", ctypes.c_uint32),
+        ]
+
+    kAudioFormatLinearPCM = 0x6C70636D  # 'lpcm'
+    kAudioFormatFlagIsSignedInteger = 4
+    kAudioFormatFlagIsPacked = 8
+
+    asbd = AudioStreamBasicDescription(
+        mSampleRate=float(SAMPLE_RATE),
+        mFormatID=kAudioFormatLinearPCM,
+        mFormatFlags=kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+        mBytesPerPacket=CHANNELS * SAMPLE_WIDTH,
+        mFramesPerPacket=1,
+        mBytesPerFrame=CHANNELS * SAMPLE_WIDTH,
+        mChannelsPerFrame=CHANNELS,
+        mBitsPerChannel=16,
+        mReserved=0,
+    )
+
+    AQCallback = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(AudioQueueBuffer))
+
+    class MacAudioQueueStream:
+        def __init__(self):
+            self.queue = ctypes.c_void_p()
+            self._cb = AQCallback(self._on_buffer_complete)
+            self._available = []
+            self._lock = threading.Lock()
+            self._started = False
+
+            hr = audio_toolbox.AudioQueueNewOutput(
+                ctypes.byref(asbd),
+                self._cb,
+                None,
+                None,
+                None,
+                0,
+                ctypes.byref(self.queue),
+            )
+            if hr != 0 or not self.queue.value:
+                raise RuntimeError(f"AudioQueueNewOutput failed with status {hr}")
+
+            self.buffers = []
+            for _ in range(6):  # 6 * 20ms = 120ms buffer pool
+                buf_ptr = ctypes.POINTER(AudioQueueBuffer)()
+                hr = audio_toolbox.AudioQueueAllocateBuffer(
+                    self.queue,
+                    FRAME_BYTES,
+                    ctypes.byref(buf_ptr),
+                )
+                if hr == 0 and buf_ptr:
+                    self.buffers.append(buf_ptr)
+                    self._available.append(buf_ptr)
+
+        def _on_buffer_complete(self, user_data, aq, buf_ptr):
+            with self._lock:
+                self._available.append(buf_ptr)
+
+        def write(self, data: bytes) -> None:
+            buf_ptr = None
+            for _ in range(15):
+                with self._lock:
+                    if self._available:
+                        buf_ptr = self._available.pop(0)
+                        break
+                time.sleep(0.002)
+
+            if buf_ptr is None:
+                # Buffer underrun/overrun, drop frame gracefully
+                return
+
+            buf = buf_ptr.contents
+            n = min(len(data), buf.mAudioDataBytesCapacity)
+            ctypes.memmove(buf.mAudioData, data, n)
+            buf.mAudioDataByteSize = n
+
+            audio_toolbox.AudioQueueEnqueueBuffer(self.queue, buf_ptr, 0, None)
+            if not self._started:
+                audio_toolbox.AudioQueueStart(self.queue, None)
+                self._started = True
+
+        def stop(self) -> None:
+            if self.queue and self.queue.value:
+                try:
+                    audio_toolbox.AudioQueueStop(self.queue, True)
+                    audio_toolbox.AudioQueueDispose(self.queue, True)
+                except Exception:
+                    pass
+                self.queue = None
+
+        def close(self) -> None:
+            self.stop()
+
+    return MacAudioQueueStream()
 
 
 class AudioPlayback:
@@ -148,6 +274,7 @@ class AudioPlayback:
         p = None
         stream = None
         try:
+            # 1. Try PyAudio backend
             try:
                 import pyaudio
                 p = pyaudio.PyAudio()
@@ -158,8 +285,39 @@ class AudioPlayback:
                     output=True,
                     frames_per_buffer=SAMPLES_PER_FRAME_PER_CH,
                 )
+                log.info("[AUDIO] Playback active using PyAudio backend.")
             except Exception as exc:
-                log.info("[AUDIO] PyAudio playback output not active (%s). Running in discard mode.", exc)
+                p = None
+                stream = None
+
+            # 2. Try sounddevice backend if PyAudio is not available
+            if stream is None:
+                try:
+                    import sounddevice as sd
+                    sd_stream = sd.RawOutputStream(
+                        samplerate=SAMPLE_RATE,
+                        channels=CHANNELS,
+                        dtype='int16',
+                        blocksize=SAMPLES_PER_FRAME_PER_CH,
+                    )
+                    sd_stream.start()
+                    stream = sd_stream
+                    log.info("[AUDIO] Playback active using sounddevice backend.")
+                except Exception:
+                    stream = None
+
+            # 3. Try native macOS CoreAudio AudioQueue (AudioToolbox) backend
+            if stream is None and sys.platform == "darwin":
+                try:
+                    stream = _create_macos_audio_queue_stream()
+                    if stream is not None:
+                        log.info("[AUDIO] Playback active using native macOS CoreAudio (AudioToolbox) backend.")
+                except Exception as exc:
+                    log.warning("[AUDIO] Native macOS CoreAudio init failed: %s", exc)
+                    stream = None
+
+            if stream is None:
+                log.info("[AUDIO] No active audio output backend available. Running in discard mode.")
 
             while not self._stop_event.is_set():
                 try:
@@ -179,8 +337,15 @@ class AudioPlayback:
         finally:
             if stream is not None:
                 try:
-                    stream.stop_stream()
-                    stream.close()
+                    if hasattr(stream, "stop_stream"):
+                        stream.stop_stream()
+                    elif hasattr(stream, "stop"):
+                        stream.stop()
+                except Exception:
+                    pass
+                try:
+                    if hasattr(stream, "close"):
+                        stream.close()
                 except Exception:
                     pass
             if p is not None:

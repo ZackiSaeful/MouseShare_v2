@@ -508,6 +508,18 @@ Berikut adalah daftar rencana pembaruan dan peningkatan fitur yang telah didokum
 
 ---
 
+### MVP v7: Transfer File Ringan Antarperangkat
+
+*Status: Ide / belum diimplementasikan.*
+
+- **Tujuan**: Memindahkan file kecil antara Mac dan Windows melalui koneksi Mousehare yang sudah terhubung.
+- **Cara penggunaan yang diusulkan**:
+  - *Drag and drop* file ke area perangkat tujuan atau ke jendela Mousehare.
+  - Menyalin file di satu perangkat lalu menempelkannya di perangkat lain.
+- **Cakupan MVP**: gambar, PDF, dan dokumen Office seperti Word. Batasi ukuran dan jumlah file agar transfer tetap ringan serta tidak mengganggu mouse, keyboard, clipboard teks, atau audio.
+- **Perilaku**: tampilkan progres dan hasil transfer; tangani nama file duplikat, pembatalan, koneksi terputus, serta penolakan file yang melebihi batas.
+- **Pertimbangan desain**: transfer file harus terpisah dari sinkronisasi clipboard teks yang ada, menggunakan sesi terenkripsi, validasi tipe/ukuran, dan penyimpanan sementara yang aman. Tentukan batas ukuran dan mekanisme persetujuan penerima sebelum implementasi.
+
 ## Ringkasan Struktur Direktori Proyek
 
 ```

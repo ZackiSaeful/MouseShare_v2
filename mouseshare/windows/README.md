@@ -7,6 +7,9 @@ Windows Agent is the TCP server.  It receives keyboard and mouse events from
 the Mac agent and injects them into Windows using pynput.
 It also monitors the edge facing the Mac and returns the pointer to the matching
 Mac edge. The Mac's configured placement is exchanged during secure pairing.
+Synthetic (injected) mouse events must be observed by the listener rather than
+filtered so the edge detector can detect when remotely controlled motion reaches
+the screen edge and hand control back to the Mac.
 
 ## Requirements
 - Windows 10 / 11

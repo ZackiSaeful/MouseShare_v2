@@ -87,7 +87,6 @@ class WinState:
         self.client_sock = None    # current Mac TCP socket
         self.client_channel = None # authenticated encrypted stream
         self.clipboard_sync_enabled = False
-        self.injecting   = False   # True while injecting a mouse movement
 
 
 STATE  = WinState()
@@ -419,11 +418,7 @@ def _handle_key(msg: dict) -> None:
 
 
 def _handle_mouse_move(msg: dict) -> None:
-    """Inject a relative mouse movement.
-
-    Uses native win32 mouse_event for hardware-accelerated, sub-millisecond
-    smooth motion, falling back to pynput. Controller if unavailable.
-    """
+    """Inject a relative mouse movement only while Windows owns control."""
     dx, dy = msg.get("dx"), msg.get("dy")
     if type(dx) is not int or type(dy) is not int or abs(dx) > 10000 or abs(dy) > 10000:
         return
@@ -432,21 +427,13 @@ def _handle_mouse_move(msg: dict) -> None:
     if CONFIG.get("debug"):
         log.debug("[MOUSE] dx=%d dy=%d", dx, dy)
     with STATE.lock:
-        STATE.injecting = True
+        active = STATE.active
+    if not active:
+        return
     try:
-        if sys.platform == "win32":
-            # 0x0001 = MOUSEEVENTF_MOVE (relative mouse movement)
-            ctypes.windll.user32.mouse_event(0x0001, dx, dy, 0, 0)
-        else:
-            _ms.move(dx, dy)
-    except Exception:
-        try:
-            _ms.move(dx, dy)
-        except Exception as exc:
-            log.error("[MOUSE] Move injection error: %s", exc)
-    finally:
-        with STATE.lock:
-            STATE.injecting = False
+        _ms.move(dx, dy)
+    except Exception as exc:
+        log.error("[MOUSE] Move injection error: %s", exc)
 
 
 def _handle_mouse_click(msg: dict) -> None:

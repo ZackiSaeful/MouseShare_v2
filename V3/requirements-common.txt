@@ -1,0 +1,2 @@
+cryptography==50.0.2
+PyInstaller==6.22.3

@@ -21,6 +21,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from PIL import Image, ImageDraw, ImageTk
+
 if sys.platform == "darwin":
     from mouseshare.mac import mac_app as agent
     ROLE = "client"
@@ -85,6 +87,7 @@ def get_local_ipv4() -> str:
 def default_settings() -> dict:
     return {
         "client_ip": "",
+        "server_host": "",
         "client_port": PORT_DEFAULT,
         "server_port": PORT_DEFAULT,
         "client_token": "",
@@ -113,13 +116,19 @@ class MousehareApp:
         self.current_page = "connect"
         self.settings_section = "General"
         self.local_ip = get_local_ipv4()
-        self.ip_var = tk.StringVar(value=self.settings.get("client_ip", ""))
+        initial_ip = (self.settings.get("client_ip", "") if ROLE == "client"
+                      else self.settings.get("server_host") or self.local_ip)
+        self.ip_var = tk.StringVar(value=initial_ip)
         self.port_var = tk.StringVar(value=str(self._current_port()))
         self.token_var = tk.StringVar(value=self._current_token())
         self.mac_position_var = tk.StringVar(
             value=self.settings.get("mac_position", "left"))
         self.status_var = tk.StringVar(value="Disconnected · Ready to start")
         self.show_token = tk.BooleanVar(value=False)
+        self.icon_eye_open = None
+        self.icon_eye_closed = None
+        self._wrapping_labels: list[tuple[tk.Label, int]] = []
+        self._settings_wrapping_labels: list[tuple[tk.Label, int]] = []
         self.mac_position_selector = None
         self.network_mac_position_selector = None
         self.mac_position_hint = None
@@ -194,6 +203,48 @@ class MousehareApp:
         key = "client_token" if ROLE == "client" else "server_token"
         return str(self.settings.get(key, ""))
 
+    def _load_eye_icons(self) -> None:
+        """Generate antialiased eye icons matching the active palette."""
+        p = self.palette
+        size = (20, 15)
+        scale = 4
+        w, h = size[0] * scale, size[1] * scale
+
+        # Render open eye
+        im_open = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d_open = ImageDraw.Draw(im_open)
+        pad_x, pad_y = 2 * scale, 2 * scale
+        box = [pad_x, pad_y, w - pad_x, h - pad_y]
+        line_w = int(1.8 * scale)
+        color_line = p["muted"]
+        color_pupil = p["accent_hi"]
+        d_open.arc(box, start=0, end=180, fill=color_line, width=line_w)
+        d_open.arc(box, start=180, end=360, fill=color_line, width=line_w)
+        cx, cy = w // 2, h // 2
+        r = int(2.5 * scale)
+        d_open.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color_pupil)
+
+        # Render closed / slashed eye
+        im_closed = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        d_closed = ImageDraw.Draw(im_closed)
+        color_dim = p["disabled"]
+        d_closed.arc(box, start=0, end=180, fill=color_line, width=line_w)
+        d_closed.arc(box, start=180, end=360, fill=color_line, width=line_w)
+        d_closed.ellipse([cx - r, cy - r, cx + r, cy + r], fill=color_dim)
+        slash_w = int(2.0 * scale)
+        d_closed.line(
+            [pad_x + 1 * scale, h - pad_y, w - pad_x - 1 * scale, pad_y],
+            fill=p["accent_hi"],
+            width=slash_w,
+        )
+
+        self.icon_eye_open = ImageTk.PhotoImage(
+            im_open.resize(size, Image.Resampling.LANCZOS)
+        )
+        self.icon_eye_closed = ImageTk.PhotoImage(
+            im_closed.resize(size, Image.Resampling.LANCZOS)
+        )
+
     def _configure_ttk(self) -> None:
         style = ttk.Style()
         try:
@@ -201,6 +252,7 @@ class MousehareApp:
         except tk.TclError:
             pass
         p = self.palette
+        self._load_eye_icons()
         style.configure("Mousehare.TCombobox", fieldbackground=p["field"],
                         background=p["panel2"], foreground=p["text"],
                         arrowcolor=p["accent"], bordercolor=p["line"],
@@ -224,29 +276,45 @@ class MousehareApp:
             "Mousehare.TButton",
             background=p["panel2"], foreground=p["text"],
             bordercolor=p["line"], lightcolor=p["panel2"],
-            darkcolor=p["line"], focuscolor=p["accent"],
-            padding=(16, 10), relief="flat",
+            darkcolor=p["line"], focuscolor=p["accent_hi"],
+            focusthickness=0,
+            padding=(12, 8), relief="flat",
             font=("Arial", 10, "bold"),
         )
         style.map(
             "Mousehare.TButton",
-            background=[("disabled", p["panel"]), ("pressed", p["line"]),
+            background=[("disabled", p["panel"]), ("pressed", "#422D19"),
                         ("active", p["line"])],
-            foreground=[("disabled", p["disabled"]), ("active", p["text"])],
+            foreground=[("disabled", "#7A6854"), ("pressed", p["accent_hi"]),
+                        ("active", p["text"])],
+            bordercolor=[("disabled", p["panel"]), ("pressed", p["accent_hi"]),
+                         ("focus", p["accent_hi"]), ("active", p["accent"])],
+            lightcolor=[("disabled", p["panel"]), ("pressed", p["accent_hi"]),
+                        ("focus", p["accent_hi"]), ("active", p["accent"])],
+            darkcolor=[("disabled", p["panel"]), ("pressed", p["accent_hi"]),
+                       ("focus", p["accent_hi"]), ("active", p["accent"])],
         )
         style.configure(
             "Mousehare.Primary.TButton",
             background=p["accent"], foreground="#18130F",
-            bordercolor=p["accent"], lightcolor=p["accent"],
+            bordercolor=p["accent"], lightcolor=p["accent_hi"],
             darkcolor=p["accent"], focuscolor=p["accent_hi"],
-            padding=(16, 10), relief="flat",
+            focusthickness=0,
+            padding=(12, 8), relief="flat",
             font=("Arial", 10, "bold"),
         )
         style.map(
             "Mousehare.Primary.TButton",
             background=[("disabled", p["panel2"]), ("pressed", p["accent_hi"]),
                         ("active", p["accent_hi"])],
-            foreground=[("disabled", p["disabled"]), ("active", "#18130F")],
+            foreground=[("disabled", "#8C7761"), ("active", "#18130F"),
+                        ("pressed", "#18130F")],
+            bordercolor=[("disabled", p["line"]), ("pressed", p["accent_hi"]),
+                         ("focus", p["accent_hi"]), ("active", p["accent_hi"])],
+            lightcolor=[("disabled", p["line"]), ("pressed", p["accent_hi"]),
+                        ("focus", p["accent_hi"]), ("active", p["accent_hi"])],
+            darkcolor=[("disabled", p["line"]), ("pressed", p["accent_hi"]),
+                       ("focus", p["accent_hi"]), ("active", p["accent_hi"])],
         )
         style.configure(
             "Mousehare.Nav.TButton",
@@ -254,35 +322,95 @@ class MousehareApp:
             bordercolor=p["panel"], lightcolor=p["panel"],
             darkcolor=p["panel"], padding=(14, 12), anchor="w",
             relief="flat", font=("Arial", 11),
+            focuscolor=p["accent_hi"], focusthickness=0,
         )
         style.map(
             "Mousehare.Nav.TButton",
             background=[("pressed", p["line"]), ("active", p["panel2"])],
-            foreground=[("active", p["text"])],
+            foreground=[("active", p["accent_hi"])],
+            bordercolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                         ("active", p["line"])],
+            lightcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                        ("active", p["line"])],
+            darkcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                       ("active", p["line"])],
         )
         style.configure(
             "Mousehare.NavSelected.TButton",
             background=p["accent"], foreground="#18130F",
-            bordercolor=p["accent"], lightcolor=p["accent"],
+            bordercolor=p["accent"], lightcolor=p["accent_hi"],
             darkcolor=p["accent"], padding=(14, 12), anchor="w",
             relief="flat", font=("Arial", 11, "bold"),
+            focuscolor=p["accent_hi"], focusthickness=0,
         )
         style.map(
             "Mousehare.NavSelected.TButton",
             background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"])],
-            foreground=[("active", "#18130F")],
+            foreground=[("pressed", "#18130F"), ("active", "#18130F")],
+            bordercolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                         ("active", p["accent_hi"])],
+            lightcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                        ("active", p["accent_hi"])],
+            darkcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                       ("active", p["accent_hi"])],
+        )
+        style.configure(
+            "Mousehare.SubNav.TButton",
+            background=p["panel2"], foreground=p["text"],
+            bordercolor=p["line"], lightcolor=p["panel2"],
+            darkcolor=p["line"], padding=(6, 5), relief="flat",
+            focuscolor=p["accent_hi"], focusthickness=0,
+            font=("Arial", 9, "bold"), anchor="w",
+        )
+        style.map(
+            "Mousehare.SubNav.TButton",
+            background=[("pressed", "#422D19"), ("active", p["line"])],
+            foreground=[("pressed", p["accent_hi"]), ("active", p["text"])],
+            bordercolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                         ("active", p["accent"])],
+            lightcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                        ("active", p["accent"])],
+            darkcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                       ("active", p["accent"])],
+        )
+        style.configure(
+            "Mousehare.SubNavSelected.TButton",
+            background=p["accent"], foreground="#18130F",
+            bordercolor=p["accent"], lightcolor=p["accent_hi"],
+            darkcolor=p["accent"], padding=(6, 5), relief="flat",
+            focuscolor=p["accent_hi"], focusthickness=0,
+            font=("Arial", 9, "bold"), anchor="w",
+        )
+        style.map(
+            "Mousehare.SubNavSelected.TButton",
+            background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"])],
+            foreground=[("pressed", "#18130F"), ("active", "#18130F")],
+            bordercolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                         ("active", p["accent_hi"])],
+            lightcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                        ("active", p["accent_hi"])],
+            darkcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                       ("active", p["accent_hi"])],
         )
         style.configure(
             "Mousehare.Small.TButton",
             background=p["panel2"], foreground=p["text"],
             bordercolor=p["line"], lightcolor=p["panel2"],
             darkcolor=p["line"], padding=(10, 4), relief="flat",
+            focuscolor=p["accent_hi"], focusthickness=0,
             font=("Arial", 8, "bold"),
         )
         style.map(
             "Mousehare.Small.TButton",
-            background=[("pressed", p["line"]), ("active", p["line"])],
-            foreground=[("active", p["text"])],
+            background=[("disabled", p["panel"]), ("pressed", p["line"]),
+                        ("active", p["line"])],
+            foreground=[("disabled", "#7A6854"), ("active", p["text"])],
+            bordercolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                         ("active", p["accent"])],
+            lightcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                        ("active", p["accent"])],
+            darkcolor=[("pressed", p["accent_hi"]), ("focus", p["accent_hi"]),
+                       ("active", p["accent"])],
         )
 
     def _build_shell(self) -> None:
@@ -291,37 +419,40 @@ class MousehareApp:
         p = self.palette
         shell = tk.Frame(self.root, bg=p["bg"])
         shell.pack(fill="both", expand=True)
-        self.sidebar = tk.Frame(shell, width=190, bg=p["panel"],
-                                highlightbackground=p["line"], highlightthickness=1)
+        self.sidebar = tk.Frame(
+            shell, width=215, bg=p["panel"],
+            highlightbackground=p["line"], highlightcolor=p["line"],
+            highlightthickness=1, takefocus=0
+        )
         self.sidebar.pack(side="left", fill="y", padx=(14, 0), pady=14)
         self.sidebar.pack_propagate(False)
         logo = tk.Canvas(self.sidebar, width=48, height=48, bg=p["panel"],
                          highlightthickness=0)
-        logo.pack(anchor="w", padx=18, pady=(20, 8))
+        logo.pack(anchor="w", padx=16, pady=(18, 6))
         logo.create_oval(4, 4, 44, 44, outline=p["accent"], width=2)
         logo.create_line(24, 8, 24, 40, fill=p["accent"], width=2)
         logo.create_line(10, 24, 38, 24, fill=p["line"], width=1)
         logo.create_oval(18, 18, 30, 30, fill=p["accent"], outline="")
         tk.Label(self.sidebar, text="MOUSEHARE", bg=p["panel"], fg=p["text"],
-                 font=("Arial", 13, "bold")).pack(anchor="w", padx=18)
+                 font=("Arial", 12, "bold"), anchor="w").pack(fill="x", padx=16)
         tk.Label(self.sidebar, text="DEVICE LINK / TVA SERIES", bg=p["panel"],
-                 fg=p["muted"], font=("Arial", 8)).pack(anchor="w", padx=18, pady=(2, 28))
+                 fg=p["muted"], font=("Arial", 8), anchor="w").pack(fill="x", padx=16, pady=(2, 24))
 
         for name, label in (("connect", "Connect"), ("settings", "Settings"), ("about", "About")):
             self._nav_button(name, label)
 
-        tk.Frame(self.sidebar, height=1, bg=p["line"]).pack(fill="x", padx=16, pady=(25, 12))
+        tk.Frame(self.sidebar, height=1, bg=p["line"]).pack(fill="x", padx=14, pady=(20, 10))
         role_text = "MAC CLIENT" if ROLE == "client" else "WINDOWS SERVER"
         tk.Label(self.sidebar, text="ACTIVE PLATFORM", bg=p["panel"], fg=p["muted"],
-                 font=("Arial", 8, "bold")).pack(anchor="w", padx=18)
+                 font=("Arial", 8, "bold"), anchor="w").pack(fill="x", padx=16)
         tk.Label(self.sidebar, text=role_text, bg=p["panel"], fg=p["accent_hi"],
-                 font=("Courier New", 10, "bold")).pack(anchor="w", padx=18, pady=(6, 0))
+                 font=("Courier New", 9, "bold"), anchor="w").pack(fill="x", padx=16, pady=(4, 0))
         tk.Label(self.sidebar, text="Mouse and keyboard\nshare over your LAN", bg=p["panel"],
-                 fg=p["muted"], justify="left", font=("Arial", 9)).pack(
-                     side="bottom", anchor="w", padx=18, pady=20)
+                 fg=p["muted"], justify="left", anchor="w", font=("Arial", 8)).pack(
+                     side="bottom", fill="x", padx=16, pady=16)
 
         self.content_area = tk.Frame(shell, bg=p["bg"])
-        self.content_area.pack(side="left", fill="both", expand=True, padx=22, pady=18)
+        self.content_area.pack(side="left", fill="both", expand=True, padx=18, pady=16)
         self._draw_status_bar()
 
         self.page_scrollbar = ttk.Scrollbar(
@@ -354,7 +485,8 @@ class MousehareApp:
     def _draw_status_bar(self) -> None:
         p = self.palette
         self.status_bar = tk.Frame(self.content_area, bg=p["panel"],
-                                   highlightbackground=p["line"], highlightthickness=1)
+                                   highlightbackground=p["line"], highlightcolor=p["line"],
+                                   highlightthickness=1, takefocus=0)
         self.status_bar.pack(side="bottom", fill="x", pady=(14, 0))
         self.status_dot = tk.Canvas(self.status_bar, width=16, height=16, bg=p["panel"],
                                     highlightthickness=0)
@@ -362,17 +494,39 @@ class MousehareApp:
         self.status_dot.create_oval(3, 3, 13, 13, fill=p["accent"], outline="")
         self.status_label = tk.Label(self.status_bar, textvariable=self.status_var,
                                      bg=p["panel"], fg=p["muted"],
-                                     font=("Arial", 9), wraplength=280,
+                                     font=("Arial", 9), wraplength=320,
                                      justify="left")
         self.status_label.pack(side="left", pady=11)
         tk.Label(self.status_bar, text="AES-GCM / TCP", bg=p["panel"], fg=p["muted"],
                  font=("Courier New", 8)).pack(side="right", padx=14)
+        self.status_bar.bind(
+            "<Configure>",
+            lambda e: self.status_label.configure(wraplength=max(180, e.width - 150))
+            if hasattr(self, "status_label") and self.status_label.winfo_exists() else None
+        )
 
     def _update_page_scrollregion(self, _event=None) -> None:
         self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
 
+    def _wrap_label(self, label: tk.Label, pad: int = 40) -> tk.Label:
+        self._wrapping_labels.append((label, pad))
+        return label
+
+    def _settings_wrap_label(self, label: tk.Label, pad: int = 44) -> tk.Label:
+        self._settings_wrapping_labels.append((label, pad))
+        return label
+
     def _resize_page_content(self, event) -> None:
         self.page_canvas.itemconfigure(self.page_window, width=event.width)
+        for label, pad in self._wrapping_labels:
+            if label.winfo_exists():
+                label.configure(wraplength=max(180, event.width - pad))
+        self.page_canvas.configure(scrollregion=self.page_canvas.bbox("all"))
+
+    def _resize_settings_content(self, event) -> None:
+        for label, pad in self._settings_wrapping_labels:
+            if label.winfo_exists():
+                label.configure(wraplength=max(140, event.width - pad))
 
     def _on_mousewheel(self, event):
         if getattr(event, "num", None) == 4:
@@ -393,6 +547,8 @@ class MousehareApp:
         self.mac_position_selector = None
         self.network_mac_position_selector = None
         self.mac_position_hint = None
+        self._wrapping_labels = []
+        self._settings_wrapping_labels = []
         for child in self.root.winfo_children():
             child.destroy()
         self._build_shell()
@@ -408,14 +564,14 @@ class MousehareApp:
         p = self.palette
         tk.Label(self.content, text=title.upper(), bg=p["bg"], fg=p["text"],
                  font=("Arial", 20, "bold")).pack(anchor="w")
-        tk.Label(self.content, text=subtitle, bg=p["bg"], fg=p["muted"],
-                 font=("Arial", 10), wraplength=520, justify="left").pack(
+        self._wrap_label(tk.Label(self.content, text=subtitle, bg=p["bg"], fg=p["muted"],
+                 font=("Arial", 10), justify="left")).pack(
                      anchor="w", pady=(3, 14))
 
     def _panel(self, parent, **pack_options):
         p = self.palette
         frame = tk.Frame(parent, bg=p["panel"], highlightbackground=p["line"],
-                         highlightthickness=1)
+                         highlightcolor=p["line"], highlightthickness=1, takefocus=0)
         frame.pack(**pack_options)
         return frame
 
@@ -442,6 +598,98 @@ class MousehareApp:
                          highlightcolor=p["accent"], font=("Courier New", 11))
         return entry
 
+    def _entry_with_eye(
+        self,
+        parent,
+        variable: tk.StringVar,
+        visible_initial: bool = True,
+        width: int = 12,
+        state: str = "normal",
+        entry_font: tuple = ("Courier New", 11),
+    ) -> tuple[tk.Frame, tk.Entry, tk.Button]:
+        """Create a compound entry field with an eye visibility toggle on the right side."""
+        p = self.palette
+        container = tk.Frame(
+            parent,
+            bg=p["field"],
+            highlightbackground=p["line"],
+            highlightcolor=p["line"],
+            highlightthickness=1,
+            takefocus=0,
+        )
+        show_char = "" if visible_initial else "•"
+        entry = tk.Entry(
+            container,
+            textvariable=variable,
+            width=width,
+            show=show_char,
+            state=state,
+            bg=p["field"],
+            fg=p["text"],
+            insertbackground=p["accent"],
+            disabledbackground=p["field"],
+            disabledforeground=p["muted"],
+            readonlybackground=p["field"],
+            selectbackground=p["accent"],
+            selectforeground="#18130F",
+            relief="flat",
+            bd=0,
+            highlightthickness=0,
+            font=entry_font,
+        )
+        entry.pack(side="left", fill="both", expand=True, padx=(8, 2), pady=6)
+
+        vis_state = {"visible": visible_initial}
+
+        eye_btn = tk.Button(
+            container,
+            image=self.icon_eye_open if visible_initial else self.icon_eye_closed,
+            bg=p["field"],
+            activebackground=p["panel2"],
+            bd=0,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=p["field"],
+            highlightcolor=p["accent_hi"],
+            cursor="hand2",
+            takefocus=True,
+        )
+        eye_btn.pack(side="right", padx=(2, 6), pady=4)
+
+        def toggle_eye(event=None):
+            vis_state["visible"] = not vis_state["visible"]
+            entry.configure(show="" if vis_state["visible"] else "•")
+            eye_btn.configure(
+                image=self.icon_eye_open if vis_state["visible"] else self.icon_eye_closed
+            )
+            return "break"
+
+        eye_btn.configure(command=toggle_eye)
+        eye_btn.bind("<Return>", toggle_eye)
+        eye_btn.bind("<space>", toggle_eye)
+
+        def on_btn_focus_in(event):
+            eye_btn.configure(highlightbackground=p["accent_hi"], highlightcolor=p["accent_hi"])
+
+        def on_btn_focus_out(event):
+            eye_btn.configure(highlightbackground=p["field"], highlightcolor=p["field"])
+
+        eye_btn.bind("<FocusIn>", on_btn_focus_in)
+        eye_btn.bind("<FocusOut>", on_btn_focus_out)
+        eye_btn.bind("<Enter>", lambda e: eye_btn.configure(bg=p["panel2"]))
+        eye_btn.bind("<Leave>", lambda e: eye_btn.configure(bg=p["field"]))
+
+        def on_entry_focus_in(event):
+            container.configure(highlightbackground=p["accent_hi"], highlightcolor=p["accent_hi"])
+
+        def on_entry_focus_out(event):
+            container.configure(highlightbackground=p["line"], highlightcolor=p["line"])
+
+        entry.bind("<FocusIn>", on_entry_focus_in)
+        entry.bind("<FocusOut>", on_entry_focus_out)
+
+        return container, entry, eye_btn
+
     def _readonly_entry(self, parent, variable, width=24):
         p = self.palette
         return tk.Entry(parent, textvariable=variable, width=width,
@@ -460,17 +708,16 @@ class MousehareApp:
 
         mode_panel = self._panel(self.content, fill="x", pady=(0, 13))
         row = tk.Frame(mode_panel, bg=p["panel"])
-        row.pack(fill="x", padx=13, pady=12)
+        row.pack(fill="x", padx=10, pady=10)
         self._mode_card(row, "Server", "Share this computer", ROLE == "server",
                         enabled=ROLE == "server").pack(side="left", fill="x", expand=True, padx=(0, 6))
         self._mode_card(row, "Client", "Connect to another", ROLE == "client",
                         enabled=ROLE == "client").pack(side="left", fill="x", expand=True, padx=(6, 0))
         # The original input-capture protocol is intentionally platform-specific.
         # Explain the companion roles instead of presenting a fake selectable mode.
-        note = "This Mac is the controller. Install Mousehare Server on the Windows computer." if ROLE == "client" else \
-               "This PC receives input. Connect from Mousehare Client on the Mac."
-        tk.Label(mode_panel, text=note, bg=p["panel"], fg=p["muted"],
-                 font=("Arial", 9), wraplength=520, justify="left").pack(
+        note = "This Mac is the controller. Install Mousehare Server on the Windows computer." if ROLE == "client" else                "This PC receives input. Connect from Mousehare Client on the Mac."
+        self._wrap_label(tk.Label(mode_panel, text=note, bg=p["panel"], fg=p["muted"],
+                 font=("Arial", 9), justify="left")).pack(
                      anchor="w", padx=18, pady=(0, 10))
 
         details = self._panel(self.content, fill="x")
@@ -479,9 +726,9 @@ class MousehareApp:
         self._section_label(details_inner, "Connection Details")
         fields = tk.Frame(details_inner, bg=p["panel"])
         fields.pack(fill="x", pady=(12, 10))
-        fields.columnconfigure(0, weight=3)
-        fields.columnconfigure(1, weight=1)
-        fields.columnconfigure(2, weight=2)
+        fields.columnconfigure(0, weight=4)
+        fields.columnconfigure(1, weight=2)
+        fields.columnconfigure(2, weight=4)
 
         if ROLE == "client":
             tk.Label(fields, text="Destination IP", bg=p["panel"], fg=p["muted"],
@@ -490,42 +737,55 @@ class MousehareApp:
                      font=("Arial", 9)).grid(row=0, column=1, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Pairing Key", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
-            self._entry(fields, self.ip_var).grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self._entry(fields, self.port_var, width=8).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self.token_entry = self._entry(fields, self.token_var, show="*")
-            self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
+            c_ip, self.ip_entry, self.ip_eye = self._entry_with_eye(
+                fields, self.ip_var, visible_initial=True, width=6
+            )
+            c_ip.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0))
+
+            c_port, self.port_entry, self.port_eye = self._entry_with_eye(
+                fields, self.port_var, visible_initial=True, width=4
+            )
+            c_port.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0))
+
+            c_token, self.token_entry, self.token_eye = self._entry_with_eye(
+                fields, self.token_var, visible_initial=False, width=6
+            )
+            c_token.grid(row=1, column=2, sticky="ew", pady=(5, 0))
         else:
-            self.ip_var.set(self.local_ip)
+            self.ip_var.set(self.settings.get("server_host") or self.local_ip)
+            self.token_var.set(self.settings["server_token"])
             tk.Label(fields, text="Local IP", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=0, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Port", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=1, sticky="w", padx=(0, 8))
             tk.Label(fields, text="Pairing Key", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 9)).grid(row=0, column=2, sticky="w")
-            self._readonly_entry(fields, self.ip_var).grid(
-                row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8
+            c_ip, self.ip_entry, self.ip_eye = self._entry_with_eye(
+                fields, self.ip_var, visible_initial=True, width=6
             )
-            self._entry(fields, self.port_var, width=8).grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0), ipady=8)
-            self.token_entry = self._entry(fields, self.token_var, show="*", state="readonly")
-            self.token_entry.grid(row=1, column=2, sticky="ew", pady=(5, 0), ipady=8)
-            self.token_var.set(self.settings["server_token"])
-        self.show_token_button = ttk.Button(
-            fields, text="Show", command=self._toggle_token_visibility,
-            style="Mousehare.Small.TButton", cursor="hand2",
-        )
-        self.show_token_button.grid(row=2, column=2, sticky="e", pady=(5, 0))
+            c_ip.grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(5, 0))
+
+            c_port, self.port_entry, self.port_eye = self._entry_with_eye(
+                fields, self.port_var, visible_initial=True, width=4
+            )
+            c_port.grid(row=1, column=1, sticky="ew", padx=(0, 8), pady=(5, 0))
+
+            c_token, self.token_entry, self.token_eye = self._entry_with_eye(
+                fields, self.token_var, visible_initial=False, width=6
+            )
+            c_token.grid(row=1, column=2, sticky="ew", pady=(5, 0))
 
         if ROLE == "client":
             pairing_actions = tk.Frame(details_inner, bg=p["panel"])
-            pairing_actions.pack(fill="x", pady=(0, 8))
+            pairing_actions.pack(fill="x", pady=(10, 8))
             self._button(pairing_actions, "Paste connection details",
                          self._paste_connection_details, side="left", padx=0, pady=0)
-            tk.Label(
+            self._wrap_label(tk.Label(
                 pairing_actions,
                 text="On Windows, choose Copy connection details first.",
                 bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                wraplength=330, justify="left",
-            ).pack(side="left", padx=(10, 0))
+                justify="left",
+            ), pad=300).pack(side="left", padx=(10, 0))
 
             position_row = tk.Frame(details_inner, bg=p["panel"])
             position_row.pack(fill="x", pady=(0, 10))
@@ -539,14 +799,33 @@ class MousehareApp:
             self.mac_position_selector.pack(side="left")
             self.mac_position_selector.bind(
                 "<<ComboboxSelected>>", lambda _event: self._save_mac_position())
-            self.mac_position_hint = tk.Label(
+            self.mac_position_hint = self._wrap_label(tk.Label(
                 details_inner, text=self._mac_position_summary(),
                 bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                wraplength=520, justify="left")
+                justify="left"))
             self.mac_position_hint.pack(anchor="w", pady=(0, 10))
+        else:
+            server_actions = tk.Frame(details_inner, bg=p["panel"])
+            server_actions.pack(fill="x", pady=(10, 8))
+            self._button(server_actions, "Copy connection details",
+                         self._copy_connection_details, fill="x", pady=(0, 6))
+            sub_actions = tk.Frame(server_actions, bg=p["panel"])
+            sub_actions.pack(fill="x")
+            self._button(sub_actions, "Copy key",
+                         self._copy_pairing_key, side="left", fill="x", expand=True, padx=(0, 6))
+            self._button(sub_actions, "Paste key",
+                         self._paste_pairing_key, side="left", fill="x", expand=True)
+
+            self._wrap_label(tk.Label(
+                details_inner,
+                text=f"The paired Mac selects the return edge. Mousehare listens on LAN address {self.local_ip}:{self._current_port()}. "
+                     "Allow Mousehare through Windows Firewall on Private networks only.",
+                bg=p["panel"], fg=p["muted"], font=("Arial", 9),
+                justify="left"
+            )).pack(anchor="w", pady=(4, 12))
 
         controls = tk.Frame(details_inner, bg=p["panel"])
-        controls.pack(fill="x")
+        controls.pack(fill="x", pady=(0, 4))
         self.primary_button = self._button(
             controls, "Connect" if ROLE == "client" else "Start Server",
             self._start_or_retry, primary=True, side="left", fill="x", expand=True,
@@ -556,7 +835,6 @@ class MousehareApp:
         )
         self._sync_connection_controls()
 
-        self._refresh_token_visibility()
         if ROLE == "client":
             permissions = tk.Frame(details_inner, bg=p["panel"])
             permissions.pack(anchor="w", pady=(8, 0))
@@ -569,21 +847,15 @@ class MousehareApp:
             self._button(permissions, "Input Monitoring settings",
                          lambda: self._open_macos_privacy("Privacy_ListenEvent"),
                          side="left", padx=(8, 9), pady=6)
-        else:
-            tk.Label(details_inner,
-                     text="The paired Mac selects the return edge. Allow Mousehare through Windows Firewall on Private networks only.",
-                     bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                     wraplength=520, justify="left").pack(anchor="w", pady=(10, 0))
-            self._button(details_inner, "Copy connection details", self._copy_connection_details,
-                         anchor="w", pady=(8, 0))
 
     def _mode_card(self, parent, title, subtitle, selected, enabled=True):
         p = self.palette
         bg = p["accent"] if selected else (p["panel2"] if enabled else p["panel"])
         fg = "#18130F" if selected else (p["text"] if enabled else p["disabled"])
         dim = "#4B2E17" if selected else (p["muted"] if enabled else p["disabled"])
-        frame = tk.Frame(parent, bg=bg, highlightbackground=p["accent"] if selected else p["line"],
-                         highlightthickness=1)
+        border_c = p["accent"] if selected else p["line"]
+        frame = tk.Frame(parent, bg=bg, highlightbackground=border_c, highlightcolor=border_c,
+                         highlightthickness=1, takefocus=0)
         tk.Label(frame, text=title.upper(), bg=bg, fg=fg,
                  font=("Arial", 11, "bold")).pack(anchor="w", padx=13, pady=(9, 0))
         tk.Label(frame, text=subtitle, bg=bg, fg=dim,
@@ -592,11 +864,12 @@ class MousehareApp:
 
     def _draw_link_visual(self, parent) -> None:
         p = self.palette
-        canvas = tk.Canvas(parent, height=168, bg=p["panel"], highlightthickness=0)
+        canvas = tk.Canvas(parent, width=380, height=168, bg=p["panel"], highlightthickness=0)
         self.link_canvas = canvas
         canvas.pack(fill="x", padx=8, pady=8)
         canvas.bind("<Configure>", lambda event: self._paint_link(canvas, event.width, event.height))
-        self._paint_link(canvas, 780, 168)
+        w = parent.winfo_width()
+        self._paint_link(canvas, w if w > 50 else 420, 168)
 
     def _paint_link(self, canvas, width, height) -> None:
         p = self.palette
@@ -660,13 +933,22 @@ class MousehareApp:
         self._title("Settings", "Network, pairing and appearance preferences")
         body = tk.Frame(self.content, bg=p["bg"])
         body.pack(fill="both", expand=True)
-        nav = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightthickness=1)
-        nav.pack(side="left", fill="y", padx=(0, 12))
+        nav = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightcolor=p["line"],
+                       highlightthickness=1, takefocus=0)
+        nav.pack(side="left", fill="y", padx=(0, 8))
         for section in ("General", "Network", "Security", "Appearance"):
-            self._button(nav, section, lambda value=section: self._set_settings_section(value),
-                         primary=section == self.settings_section, fill="x", padx=8, pady=4)
-        self.settings_content = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightthickness=1)
+            is_active = section == self.settings_section
+            btn = ttk.Button(
+                nav, text=section,
+                style="Mousehare.SubNavSelected.TButton" if is_active else "Mousehare.SubNav.TButton",
+                command=lambda value=section: self._set_settings_section(value),
+                cursor="hand2",
+            )
+            btn.pack(fill="x", padx=4, pady=2)
+        self.settings_content = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightcolor=p["line"],
+                                         highlightthickness=1, takefocus=0)
         self.settings_content.pack(side="left", fill="both", expand=True)
+        self.settings_content.bind("<Configure>", self._resize_settings_content)
         self._draw_settings_section()
 
     def _set_settings_section(self, section: str) -> None:
@@ -675,10 +957,11 @@ class MousehareApp:
 
     def _draw_settings_section(self) -> None:
         p = self.palette
+        self._settings_wrapping_labels = []
         for child in self.settings_content.winfo_children():
             child.destroy()
         wrap = tk.Frame(self.settings_content, bg=p["panel"])
-        wrap.pack(fill="both", expand=True, padx=22, pady=20)
+        wrap.pack(fill="both", expand=True, padx=16, pady=16)
         tk.Label(wrap, text=self.settings_section, bg=p["panel"], fg=p["text"],
                  font=("Arial", 15, "bold")).pack(anchor="w", pady=(0, 16))
         if self.settings_section == "General":
@@ -688,13 +971,15 @@ class MousehareApp:
             self._entry(wrap, self.settings_port_var, width=12).pack(anchor="w", pady=(5, 12), ipady=7)
             self._button(wrap, "Save default port", self._save_general_settings,
                          primary=True, anchor="w")
-            tk.Label(wrap, text="Mousehare's existing TCP protocol uses port 5555 by default.",
-                     bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                     wraplength=500, justify="left").pack(anchor="w", pady=(14, 0))
+            self._settings_wrap_label(tk.Label(
+                wrap, text="Mousehare's existing TCP protocol uses port 5555 by default.",
+                bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
+            )).pack(anchor="w", pady=(14, 0))
         elif self.settings_section == "Network":
-            tk.Label(wrap, text="Manual IP and port configuration stays available on every build.",
-                     bg=p["panel"], fg=p["text"], font=("Arial", 10),
-                     wraplength=520, justify="left").pack(anchor="w")
+            self._settings_wrap_label(tk.Label(
+                wrap, text="Manual IP and port configuration stays available on every build.",
+                bg=p["panel"], fg=p["text"], font=("Arial", 10), justify="left"
+            )).pack(anchor="w")
             if ROLE == "client":
                 tk.Label(wrap, text="Mac position relative to Windows", bg=p["panel"],
                          fg=p["muted"], font=("Arial", 10)).pack(anchor="w", pady=(16, 0))
@@ -704,35 +989,45 @@ class MousehareApp:
                 self.network_mac_position_selector.pack(anchor="w", pady=(5, 0))
                 self.network_mac_position_selector.bind(
                     "<<ComboboxSelected>>", lambda _event: self._save_mac_position())
-                tk.Label(wrap,
-                         text="This chooses the touching edges. For example, Mac left means Mac right → Windows left, and Windows left → Mac right. Changes are saved immediately.",
-                         bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                         wraplength=520, justify="left").pack(anchor="w", pady=(6, 0))
+                self._settings_wrap_label(tk.Label(
+                    wrap,
+                    text="This chooses the touching edges. For example, Mac left means Mac right → Windows left, and Windows left → Mac right. Changes are saved immediately.",
+                    bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
+                )).pack(anchor="w", pady=(6, 0))
             else:
-                tk.Label(wrap, text="The Mac sets its position during secure pairing. The Windows cursor enters on the edge facing that Mac.",
-                         bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                         wraplength=520, justify="left").pack(anchor="w", pady=(16, 0))
-            tk.Label(wrap, text="Edge handoff threshold (pixels)", bg=p["panel"], fg=p["muted"],
-                     font=("Arial", 10)).pack(anchor="w", pady=(18, 0))
+                self._settings_wrap_label(tk.Label(
+                    wrap, text="The Mac sets its position during secure pairing. The Windows cursor enters on the edge facing that Mac.",
+                    bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
+                )).pack(anchor="w", pady=(16, 0))
+            self._settings_wrap_label(tk.Label(
+                wrap, text="Edge handoff threshold (pixels)", bg=p["panel"], fg=p["muted"],
+                font=("Arial", 10), justify="left"
+            )).pack(anchor="w", pady=(18, 0))
             self.threshold_var = tk.StringVar(value=str(self.settings.get("edge_threshold", 3)))
             self._entry(wrap, self.threshold_var, width=12).pack(anchor="w", pady=(5, 10), ipady=7)
             self._button(wrap, "Save network settings", self._save_network_settings,
                          primary=True, anchor="w")
-            tk.Label(wrap, text="Automatic discovery is not implemented by the current protocol. Enter the peer's LAN IP directly.",
-                     bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                     wraplength=520, justify="left").pack(anchor="w")
-            tk.Label(wrap, text=f"Current LAN address: {self.local_ip}", bg=p["panel"],
-                     fg=p["accent_hi"], font=("Courier New", 10)).pack(anchor="w", pady=(18, 0))
+            self._settings_wrap_label(tk.Label(
+                wrap, text="Automatic discovery is not implemented by the current protocol. Enter the peer's LAN IP directly.",
+                bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
+            )).pack(anchor="w", pady=(10, 0))
+            self._settings_wrap_label(tk.Label(
+                wrap, text=f"Current LAN address: {self.local_ip}", bg=p["panel"],
+                fg=p["accent_hi"], font=("Courier New", 10), justify="left"
+            )).pack(anchor="w", pady=(18, 0))
         elif self.settings_section == "Security":
-            tk.Label(wrap, text="Pair only with a computer you trust on the same local network.",
-                     bg=p["panel"], fg=p["text"], font=("Arial", 10),
-                     wraplength=520, justify="left").pack(anchor="w")
-            tk.Label(wrap, text="Mousehare accepts any non-empty pairing key. New keys are generated as 22 characters from 128 bits of randomness. A short, self-chosen key can be guessed from a recorded pairing exchange, so use the generated key whenever possible. Mouse and keyboard messages are encrypted and replay-protected. Keep the key private and do not forward the server port to the public internet.",
-                     bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                     wraplength=520, justify="left").pack(anchor="w", pady=(10, 16))
-            tk.Label(wrap, text="The key is remembered in this user's settings. Anyone with access to this user account can read it; regenerate the key if it may have been exposed.",
-                     bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                     wraplength=520, justify="left").pack(anchor="w", pady=(0, 14))
+            self._settings_wrap_label(tk.Label(
+                wrap, text="Pair only with a computer you trust on the same local network.",
+                bg=p["panel"], fg=p["text"], font=("Arial", 10), justify="left"
+            )).pack(anchor="w")
+            self._settings_wrap_label(tk.Label(
+                wrap, text="Mousehare accepts any non-empty pairing key. New keys are generated as 22 characters from 128 bits of randomness. A short, self-chosen key can be guessed from a recorded pairing exchange, so use the generated key whenever possible. Mouse and keyboard messages are encrypted and replay-protected. Keep the key private and do not forward the server port to the public internet.",
+                bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
+            )).pack(anchor="w", pady=(10, 16))
+            self._settings_wrap_label(tk.Label(
+                wrap, text="The key is remembered in this user's settings. Anyone with access to this user account can read it; regenerate the key if it may have been exposed.",
+                bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
+            )).pack(anchor="w", pady=(0, 14))
             self.clipboard_sync_var = tk.BooleanVar(
                 value=bool(self.settings.get("clipboard_sync", False)))
             clipboard_toggle = tk.Checkbutton(
@@ -740,15 +1035,16 @@ class MousehareApp:
                 variable=self.clipboard_sync_var, bg=p["panel"], fg=p["text"],
                 selectcolor=p["field"], activebackground=p["panel"],
                 activeforeground=p["text"], disabledforeground=p["disabled"],
-                font=("Arial", 10), state="disabled" if self.backend_active else "normal",
+                font=("Arial", 10), wraplength=220, justify="left", anchor="w",
+                state="disabled" if self.backend_active else "normal",
             )
             clipboard_toggle.pack(anchor="w", pady=(0, 5))
-            tk.Label(
+            self._settings_wrap_label(clipboard_toggle, pad=48)
+            self._settings_wrap_label(tk.Label(
                 wrap,
                 text="Optional and off by default. Only plain text up to 48 KiB is shared, and only when both computers enable it. Connecting does not send existing clipboard contents. Clipboard text may contain passwords or private information. macOS may show a clipboard access prompt. Disconnect before changing this setting, then reconnect both computers.",
-                bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                wraplength=520, justify="left",
-            ).pack(anchor="w", pady=(0, 9))
+                bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left",
+            )).pack(anchor="w", pady=(0, 9))
             self._button(wrap, "Save clipboard preference",
                          self._save_clipboard_preference,
                          primary=True, anchor="w", pady=(0, 16))
@@ -762,34 +1058,32 @@ class MousehareApp:
                     activeforeground=p["text"], disabledforeground=p["disabled"],
                     font=("Arial", 10), state="disabled" if self.backend_active else "normal",
                 ).pack(anchor="w", pady=(0, 5))
-                tk.Label(
+                self._settings_wrap_label(tk.Label(
                     wrap,
                     text="Off by default. Enable only to connect to an older Windows Mousehare build. "
                          "Its pairing key and mouse or keyboard events can be read on the local network; "
                          "clipboard sharing stays off, and it supports only Mac left of Windows. "
                          "Disconnect before changing this setting.",
-                    bg=p["panel"], fg=p["red"], font=("Arial", 9),
-                    wraplength=520, justify="left",
-                ).pack(anchor="w", pady=(0, 8))
+                    bg=p["panel"], fg=p["red"], font=("Arial", 9), justify="left",
+                )).pack(anchor="w", pady=(0, 8))
                 self._button(wrap, "Save legacy connection preference",
                              self._save_legacy_protocol_preference,
                              anchor="w", pady=(0, 16))
             if ROLE == "server":
                 self.settings_token_var = tk.StringVar(value=self.settings["server_token"])
-                self.settings_key_entry = self._entry(
-                    wrap, self.settings_token_var, width=44, show="*", state="readonly")
-                self.settings_key_entry.pack(anchor="w", ipady=7)
-                self.settings_key_show = tk.BooleanVar(value=False)
-                tk.Checkbutton(wrap, text="Show pairing key", variable=self.settings_key_show,
-                               command=self._toggle_settings_key, bg=p["panel"], fg=p["muted"],
-                               selectcolor=p["field"], activebackground=p["panel"],
-                               activeforeground=p["text"], font=("Arial", 9)).pack(anchor="w", pady=(5, 0))
+                tk.Label(wrap, text="Server Pairing Key", bg=p["panel"], fg=p["muted"],
+                         font=("Arial", 10)).pack(anchor="w", pady=(10, 0))
+                sec_c, self.settings_key_entry, self.settings_key_eye = self._entry_with_eye(
+                    wrap, self.settings_token_var, visible_initial=False, width=12
+                )
+                sec_c.pack(fill="x", expand=True, pady=(5, 10))
                 self._button(wrap, "Regenerate pairing key", self._regenerate_token,
-                             primary=True, anchor="w", pady=(12, 0))
+                             primary=True, anchor="w", pady=(0, 10))
             else:
-                tk.Label(wrap, text="Enter the pairing key shown by the Windows server on the Connect screen.",
-                         bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                         wraplength=520, justify="left").pack(anchor="w")
+                self._settings_wrap_label(tk.Label(
+                    wrap, text="Enter the pairing key shown by the Windows server on the Connect screen.",
+                    bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
+                )).pack(anchor="w")
         else:
             tk.Label(wrap, text="Theme", bg=p["panel"], fg=p["muted"],
                      font=("Arial", 10)).pack(anchor="w")
@@ -799,9 +1093,10 @@ class MousehareApp:
                                  style="Mousehare.TCombobox", width=20)
             theme.pack(anchor="w", pady=(6, 12))
             theme.bind("<<ComboboxSelected>>", lambda _event: self._save_theme())
-            tk.Label(wrap, text="Warm amber, bronze and dark TVA control-panel style.",
-                     bg=p["panel"], fg=p["muted"], font=("Arial", 9),
-                     wraplength=520, justify="left").pack(anchor="w")
+            self._settings_wrap_label(tk.Label(
+                wrap, text="Warm amber, bronze and dark TVA control-panel style.",
+                bg=p["panel"], fg=p["muted"], font=("Arial", 9), justify="left"
+            )).pack(anchor="w")
 
     def _save_general_settings(self) -> None:
         try:
@@ -875,12 +1170,15 @@ class MousehareApp:
             messagebox.showwarning("Stop server first", "Disconnect before rotating the pairing key.", parent=self.root)
             return
         previous_token = self.settings["server_token"]
-        self.settings["server_token"] = secrets.token_urlsafe(16)
-        self.settings_token_var.set(self.settings["server_token"])
-        self.token_var.set(self.settings["server_token"])
+        new_token = secrets.token_urlsafe(16)
+        self.settings["server_token"] = new_token
+        if hasattr(self, "settings_token_var"):
+            self.settings_token_var.set(new_token)
+        self.token_var.set(new_token)
         if not self._save_settings():
             self.settings["server_token"] = previous_token
-            self.settings_token_var.set(previous_token)
+            if hasattr(self, "settings_token_var"):
+                self.settings_token_var.set(previous_token)
             self.token_var.set(previous_token)
             return
         self._set_status("disconnected", "A new pairing key was generated.")
@@ -930,6 +1228,7 @@ class MousehareApp:
         if not self._save_settings():
             return
         self.palette = PALETTES[self.settings["theme"]]
+        self._load_eye_icons()
         self._configure_ttk()
         self._show_page("settings")
 
@@ -976,20 +1275,20 @@ class MousehareApp:
         card = self._panel(self.content, fill="x", pady=(0, 12))
         tk.Label(card, text="MOUSEHARE", bg=p["panel"], fg=p["accent_hi"],
                  font=("Arial", 18, "bold")).pack(anchor="w", padx=20, pady=(18, 5))
-        tk.Label(card, text="Share keyboard and mouse input between a Mac and a Windows PC over a trusted local network.",
-                 bg=p["panel"], fg=p["text"], font=("Arial", 10), wraplength=600,
-                 justify="left").pack(anchor="w", padx=20, pady=(0, 18))
+        self._wrap_label(tk.Label(card, text="Share keyboard and mouse input between a Mac and a Windows PC over a trusted local network.",
+                 bg=p["panel"], fg=p["text"], font=("Arial", 10),
+                 justify="left"), pad=60).pack(anchor="w", padx=20, pady=(0, 18))
         info = "macOS needs Accessibility and Input Monitoring permission for global input capture. Windows may ask to allow Mousehare on Private networks in Windows Firewall."
-        tk.Label(self.content, text=info, bg=p["bg"], fg=p["muted"], font=("Arial", 10),
-                 wraplength=650, justify="left").pack(anchor="w", pady=6)
-        tk.Label(self.content, text="Mousehare uses 4-byte framed TCP transport with encrypted, sequence-checked messages. Default port: 5555.",
-                 bg=p["bg"], fg=p["muted"], font=("Arial", 9), wraplength=650,
-                 justify="left").pack(anchor="w", pady=6)
+        self._wrap_label(tk.Label(self.content, text=info, bg=p["bg"], fg=p["muted"], font=("Arial", 10),
+                 justify="left")).pack(anchor="w", pady=6)
+        self._wrap_label(tk.Label(self.content, text="Mousehare uses 4-byte framed TCP transport with encrypted, sequence-checked messages. Default port: 5555.",
+                 bg=p["bg"], fg=p["muted"], font=("Arial", 9),
+                 justify="left")).pack(anchor="w", pady=6)
 
     def _refresh_token_visibility(self) -> None:
         token_entry = getattr(self, "token_entry", None)
         if token_entry is not None:
-            token_entry.configure(show="" if self.show_token.get() else "*")
+            token_entry.configure(show="" if self.show_token.get() else "\u2022")
         show_button = getattr(self, "show_token_button", None)
         if show_button is not None:
             show_button.configure(text="Hide" if self.show_token.get() else "Show")
@@ -1089,19 +1388,84 @@ class MousehareApp:
                     "clipboard_sync": bool(self.settings.get("clipboard_sync", False)),
                     "allow_legacy_protocol": bool(self.settings.get("allow_legacy_protocol", False)),
                     "debug": False}
+        host = self.ip_var.get().strip()
+        try:
+            ipaddress.IPv4Address(host)
+        except ipaddress.AddressValueError:
+            messagebox.showerror(
+                "Invalid address", "Enter a valid IPv4 address for the Windows server.",
+                parent=self.root,
+            )
+            return None
+        self.settings["server_host"] = host
         self.settings["server_port"] = port
         self.settings["server_token"] = token
-        return {"host": self.local_ip, "port": port, "token": token,
+        return {"host": host, "port": port, "token": token,
                 "edge_threshold": int(self.settings.get("edge_threshold", 3)),
                 "mac_position": self.settings.get("mac_position", "left"),
                 "clipboard_sync": bool(self.settings.get("clipboard_sync", False)),
                 "debug": False}
 
     def _copy_connection_details(self) -> None:
-        details = f"{self.local_ip}:{self.port_var.get()}\n{self.token_var.get()}"
+        host = self.ip_var.get().strip()
+        try:
+            selected = ipaddress.IPv4Address(host)
+        except ipaddress.AddressValueError:
+            selected = None
+        advertised_host = self.local_ip if selected is None or selected.is_unspecified else host
+        details = f"{advertised_host}:{self.port_var.get()}\n{self.token_var.get()}"
         self.root.clipboard_clear()
         self.root.clipboard_append(details)
         self._set_status("disconnected", "LAN address, port and pairing key copied.")
+
+    def _copy_pairing_key(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.token_var.get())
+        self.root.update_idletasks()
+        self._set_status("disconnected", "Pairing key copied to clipboard.")
+
+    def _paste_pairing_key(self) -> None:
+        try:
+            clipboard_text = self.root.clipboard_get().strip()
+        except tk.TclError:
+            clipboard_text = ""
+
+        lines = [line.strip() for line in clipboard_text.splitlines() if line.strip()]
+        if not lines:
+            messagebox.showwarning(
+                "Clipboard is empty", "Copy the pairing key first, then try again.",
+                parent=self.root,
+            )
+            return
+
+        key = lines[-1]
+        details_pasted = False
+        if len(lines) == 2:
+            host, separator, port_text = lines[0].rpartition(":")
+            if separator:
+                try:
+                    ipaddress.IPv4Address(host)
+                    port = int(port_text)
+                    if not 1 <= port <= 65535:
+                        raise ValueError
+                except (ipaddress.AddressValueError, ValueError):
+                    pass
+                else:
+                    self.ip_var.set(host)
+                    self.port_var.set(str(port))
+                    details_pasted = True
+
+        self.token_var.set(key)
+        if ROLE == "server":
+            self.settings["server_token"] = key
+            if hasattr(self, "settings_token_var"):
+                self.settings_token_var.set(key)
+        else:
+            self.settings["client_token"] = key
+        self._save_settings()
+        status = "Connection details and pairing key pasted." if details_pasted else \
+                 "Pairing key pasted from clipboard."
+        self._set_status("disconnected", status)
 
     def _start_or_retry(self) -> None:
         if self.backend_active:

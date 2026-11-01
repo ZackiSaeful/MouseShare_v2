@@ -723,6 +723,12 @@ def _dispatch(msg: dict) -> None:
             _apply_remote_clipboard(msg)
     elif msg_type == "audio_control":
         _handle_audio_control(msg)
+    elif msg_type == "ping":
+        # Authenticated heartbeat used by the Mac to restore local input
+        # quickly if this server stops responding without closing TCP cleanly.
+        nonce = msg.get("nonce")
+        if type(nonce) is int and nonce >= 0:
+            _net_send({"type": "pong", "nonce": nonce})
     else:
         log.debug("[NETWORK] Unknown message type: %r", msg_type)
 

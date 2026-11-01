@@ -496,6 +496,12 @@ _held_mouse_buttons: set[str] = set()
 _held_mouse_lock = threading.Lock()
 _HANDOFF_RELEASE_MARKER = 0x4D534852
 
+# A connected TCP socket can remain apparently open for minutes after a peer
+# is powered off.  The encrypted application heartbeat gives the Mac a short,
+# deterministic fail-safe window; TCP keepalive is retained as a second layer.
+_HEARTBEAT_INTERVAL_SECONDS = 1.0
+_HEARTBEAT_TIMEOUT_SECONDS = 3.5
+
 
 def _main_display_geometry() -> tuple[float, float, float, float]:
     """Return main display bounds in Quartz points, matching event coordinates."""
@@ -612,6 +618,88 @@ def _net_send(msg: dict) -> bool:
     if s is None or channel is None:
         return False
     return channel.send(s, msg, send_message)
+
+
+class _HeartbeatMonitor:
+    """Detect an unresponsive Windows peer without relying on OS TCP timers."""
+
+    def __init__(self, sock, channel) -> None:
+        self._sock = sock
+        self._channel = channel
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._last_pong = time.monotonic()
+        self._pending_nonce: int | None = None
+        self._next_nonce = 0
+        self._last_ping = 0.0
+        self._sender_thread: threading.Thread | None = None
+        self._watchdog_thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._sender_thread is not None and self._sender_thread.is_alive():
+            return
+        self._sender_thread = threading.Thread(
+            target=self._send_loop, daemon=True, name="ConnectionHeartbeat"
+        )
+        self._watchdog_thread = threading.Thread(
+            target=self._watch_loop, daemon=True, name="ConnectionWatchdog"
+        )
+        self._sender_thread.start()
+        self._watchdog_thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def receive_pong(self, nonce) -> None:
+        if type(nonce) is not int:
+            return
+        with self._lock:
+            if nonce != self._pending_nonce:
+                return
+            self._pending_nonce = None
+            self._last_pong = time.monotonic()
+
+    def _send_loop(self) -> None:
+        while not self._stop.is_set():
+            now = time.monotonic()
+            with self._lock:
+                should_ping = (
+                    self._pending_nonce is None
+                    and now - self._last_ping >= _HEARTBEAT_INTERVAL_SECONDS
+                )
+                nonce = None
+                if should_ping:
+                    nonce = self._next_nonce
+                    self._next_nonce += 1
+                    self._pending_nonce = nonce
+                    self._last_ping = now
+
+            if nonce is not None and not self._channel.send(
+                self._sock, {"type": "ping", "nonce": nonce}, send_message
+            ):
+                log.warning("[HEARTBEAT] Ping send failed; restoring local Mac input")
+                self._stop.set()
+                _on_conn_lost(self._sock)
+                return
+
+            self._stop.wait(_HEARTBEAT_INTERVAL_SECONDS)
+
+    def _watch_loop(self) -> None:
+        while not self._stop.wait(0.1):
+            with self._lock:
+                timed_out = (
+                    time.monotonic() - self._last_pong
+                    >= _HEARTBEAT_TIMEOUT_SECONDS
+                )
+            if timed_out:
+                log.warning(
+                    "[HEARTBEAT] Windows did not respond for %.1f s; "
+                    "restoring local Mac input",
+                    _HEARTBEAT_TIMEOUT_SECONDS,
+                )
+                self._stop.set()
+                _on_conn_lost(self._sock)
+                return
 
 
 def _deliver_queued_input(channel, msg: dict) -> bool:
@@ -1154,7 +1242,7 @@ def _on_conn_lost(expected_sock=None) -> None:
     _notify_status("connecting", "Connection lost. Reconnecting…")
 
 
-def _recv_loop(sock, channel) -> None:
+def _recv_loop(sock, channel, heartbeat: _HeartbeatMonitor | None = None) -> None:
     """Daemon thread: reads framed messages from Windows until connection closes."""
     log.info("[NETWORK] Receive loop started")
     try:
@@ -1167,18 +1255,20 @@ def _recv_loop(sock, channel) -> None:
             if msg is None:
                 break
             try:
-                _handle_incoming(msg)
+                _handle_incoming(msg, heartbeat)
             except Exception:
                 # A bad message must not kill the connection. A failure in
                 # the receive path itself, however, is handled by finally.
                 log.exception("[NETWORK] Error handling incoming message")
     finally:
+        if heartbeat is not None:
+            heartbeat.stop()
         if not _quit_event.is_set():
             _on_conn_lost(sock)
         log.info("[NETWORK] Receive loop ended")
 
 
-def _handle_incoming(msg: dict) -> None:
+def _handle_incoming(msg: dict, heartbeat: _HeartbeatMonitor | None = None) -> None:
     msg_type = msg.get("type")
     log.debug("[NETWORK] <- %s", msg_type)
 
@@ -1193,6 +1283,10 @@ def _handle_incoming(msg: dict) -> None:
 
     elif msg_type == "clipboard":
         _apply_remote_clipboard(msg)
+
+    elif msg_type == "pong":
+        if heartbeat is not None:
+            heartbeat.receive_pong(msg.get("nonce"))
 
     elif msg_type == "audio_pcm":
         _receive_audio_frame(msg)
@@ -1242,6 +1336,7 @@ def _connect_loop(generation: int | None = None) -> None:
         log.info("[NETWORK] Connecting to %s:%d ...", host, port)
         _notify_status("connecting", f"Connecting to {host}:{port}…")
         s = None
+        heartbeat = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -1249,9 +1344,9 @@ def _connect_loop(generation: int | None = None) -> None:
             # TCP session was previously idle and no FIN/RST reaches the Mac.
             s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             for option_name, value in (
-                ("TCP_KEEPALIVE", 5),    # seconds before first probe on macOS
-                ("TCP_KEEPINTVL", 2),    # probe interval
-                ("TCP_KEEPCNT", 3),      # fail after three unanswered probes
+                ("TCP_KEEPALIVE", 2),    # seconds before first probe on macOS
+                ("TCP_KEEPINTVL", 1),    # probe interval
+                ("TCP_KEEPCNT", 2),      # fail after two unanswered probes
             ):
                 option = getattr(socket, option_name, None)
                 if option is not None:
@@ -1292,9 +1387,17 @@ def _connect_loop(generation: int | None = None) -> None:
                     audio_enabled = _ensure_audio_playback(force_retry=True)
                 _send_audio_control(s, channel, audio_enabled, force=True)
 
+                # A protocol heartbeat detects a silent server shutdown in a
+                # few seconds, independent of macOS's much longer TCP timers.
+                heartbeat = _HeartbeatMonitor(s, channel)
+                heartbeat.start()
+
             # Run the receive loop and wait until it exits (connection lost)
             recv_t = threading.Thread(
-                target=_recv_loop, args=(s, channel), daemon=True, name="RecvLoop"
+                target=_recv_loop,
+                args=(s, channel, heartbeat),
+                daemon=True,
+                name="RecvLoop",
             )
             recv_t.start()
             recv_t.join()   # blocks until connection is lost
@@ -1319,12 +1422,15 @@ def _connect_loop(generation: int | None = None) -> None:
                     pass
             if still_current():
                 _notify_status("error", f"Could not connect to {host}:{port}: {exc}")
+        finally:
+            if heartbeat is not None:
+                heartbeat.stop()
 
         if still_current():
             log.info("[NETWORK] Reconnecting in %.1f s...", retry_delay)
             if _quit_event.wait(retry_delay):
                 break
-            retry_delay = min(15.0, retry_delay * 2.0)
+            retry_delay = min(5.0, retry_delay * 2.0)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

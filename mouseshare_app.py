@@ -926,7 +926,7 @@ class MousehareApp:
             is_active = section == self.settings_section
             btn = ttk.Button(
                 nav, text=section,
-                style="Mousehare.SubNavSelected.TButton" if is_active else "Mousehare.SubNav.TButton",
+                style="Mousehare.NavSelected.TButton" if is_active else "Mousehare.Nav.TButton",
                 command=lambda value=section: self._set_settings_section(value),
                 cursor="hand2",
             )

@@ -7,12 +7,8 @@ Metode Audit    : Comprehensive Static Code Analysis (Strict Read-Only)
 Waktu Mulai     : 2026-11-02 08:03:35 WIB (UTC+7)
 Waktu Selesai   : 2026-11-02 08:14:00 WIB (UTC+7)
 Auditor         : Antigravity Advanced Defensive Security Auditor
-<<<<<<< HEAD
 Status Kode     : Kode tidak diubah selama audit awal (08:03-08:14 WIB);
                   perubahan setelah audit awal dicatat di addendum.
-=======
-Status Kode     : Tidak ada satu karakter pun kode yang diubah / dimodifikasi.
->>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 ================================================================================
 
 1. IDENTITAS PROYEK DAN LOKASI FOLDER
@@ -524,17 +520,11 @@ SHA256: 4addf28393dfb393344bafea41aa945905f5cbfc63c15f4e81010cd1af71eaa5 [MATCH 
 
 11. KESIMPULAN AKHIR
 --------------------------------------------------------------------------------
-<<<<<<< HEAD
 Berdasarkan file dan cakupan yang berhasil diperiksa selama audit awal (08:03-08:14 WIB),
 tidak ditemukan indikasi malware, virus, trojan, backdoor, perintah tersembunyi,
 pencurian data, exfiltrasi jaringan, atau mekanisme persistensi tersembunyi.
 Kesimpulan ini terbatas pada snapshot audit tersebut dan bukan jaminan proyek bebas
 dari malware atau kerentanan.
-=======
-Kode proyek Mousehare pada macOS BERSIH DARI MALWARE, VIRUS, TROJAN, BACKDOOR, ATAUPUN
-PERINTAH TERSEMBUNYI. Tidak ada aktivitas pencurian data, exfiltrasi jaringan, atau
-mekanisme persistensi tersembunyi.
->>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 
 Pola hooking sistem tingkat rendah (CGEventTap) yang digunakan adalah mekanisme sah
 dan standar untuk aplikasi KVM sharing lintas sistem operasi. Celah keamanan yang
@@ -542,7 +532,6 @@ teridentifikasi merupakan kelemahan arsitektur/konfigurasi (seperti token templa
 dukungan unencrypted legacy protocol, dan kurangnya filter transient clipboard untuk
 password manager) yang telah dicatat lengkap dengan bukti kode dan rekomendasi remidiasi.
 
-<<<<<<< HEAD
 Selama pelaksanaan audit awal, integritas file proyek dipertahankan tanpa modifikasi
 kode. Perubahan yang terjadi setelah audit awal dijelaskan di Addendum 12.
 ================================================================================
@@ -610,10 +599,41 @@ permintaan rebuild. Tidak dilakukan pengujian dinamis keamanan atau pemindaian
 malware pada addendum ini.
 
 ================================================================================
-                           AKHIR DOKUMEN DAN ADDENDUM
-=======
-Seluruh integritas file proyek dipertahankan dalam kondisi aslinya tanpa modifikasi kode.
+                           AKHIR DOKUMEN DAN ADDENDUM 12
 ================================================================================
-                                AKHIR DOKUMEN
->>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
+
+13. ADDENDUM PEMERIKSAAN PERUBAHAN AUDIO DAN RECONNECT
+--------------------------------------------------------------------------------
+Tanggal/waktu: 2026-11-02 10:35 WIB
+Cakupan: tinjauan terarah atas penyatuan kontrol volume audio dan pembatasan
+percobaan koneksi ulang Mac. Bukan audit ulang seluruh proyek.
+
+Perubahan yang ditinjau:
+1. ./mouseshare_app.py:858-872, 1299-1316
+   Slider Home dan Settings sekarang memakai windows_audio_volume yang sama.
+   Perubahan hanya memengaruhi gain lokal playback; tidak mengubah keamanan protokol.
+2. ./mouseshare/mac/mac_app.py:1180-1181, 1371-1381, 1397-1405, 1462-1465
+   Percobaan reconnect dibatasi 2 detik; batas waktu connect memakai sisa jendela
+   retry dan percobaan singkat tidak memperpanjang jendela kecuali sesi sebelumnya
+   telah stabil setidaknya 15 detik. Ini mengurangi retry tanpa batas dan beban
+   ketersediaan. Perubahan tidak mengubah pairing maupun SecureChannel.
+
+Penilaian keamanan perubahan: tidak ditemukan indikasi masalah kerahasiaan,
+integritas, bypass autentikasi, atau kode berbahaya pada perubahan terarah ini.
+Perubahan reconnect memengaruhi ketersediaan saja. Kesimpulan ini terbatas pada
+baris yang ditinjau; tidak menggantikan audit penuh.
+
+Hash snapshot setelah perubahan dan build:
+File: ./mouseshare_app.py
+SHA256: 3b18ed4907d944020836ed291ea3169b6c208a4247edf39cf789b937197f4bfe
+File: ./mouseshare/mac/mac_app.py
+SHA256: 50f62a69129e4a97eef07df2e2daddfcf0cfbbb9afd5bcb37771e93a0ebd3886
+File: ./release/Mousehare-macos-arm64.dmg
+SHA256: bbd1b56a615bb42308edd24b9ae3ad15225f5400f723fff95bb5fd5c031c4b0f
+
+Build Mac selesai dan tanda tangan bundle diverifikasi. Pemeriksaan ini tidak
+menjalankan pengujian dinamis keamanan.
+
+================================================================================
+                        AKHIR DOKUMEN DAN ADDENDUM 13
 ================================================================================

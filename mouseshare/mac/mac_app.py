@@ -500,13 +500,9 @@ _HANDOFF_RELEASE_MARKER = 0x4D534852
 # is powered off.  The encrypted application heartbeat gives the Mac a short,
 # deterministic fail-safe window; TCP keepalive is retained as a second layer.
 _HEARTBEAT_INTERVAL_SECONDS = 1.0
-<<<<<<< HEAD
 # Allow brief Wi-Fi / scheduler stalls without treating a healthy session as
 # dead. This remains a short fail-safe if the Windows host powers off silently.
 _HEARTBEAT_TIMEOUT_SECONDS = 8.0
-=======
-_HEARTBEAT_TIMEOUT_SECONDS = 3.5
->>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 
 
 def _main_display_geometry() -> tuple[float, float, float, float]:
@@ -1181,11 +1177,8 @@ _connection_loss_dispatch_lock = threading.Lock()
 _connection_loss_pending = False
 _pending_connection_lock = threading.Lock()
 _pending_connection_socket = None
-_AUTO_RECONNECT_WINDOW_SECONDS = 120.0
-<<<<<<< HEAD
+_AUTO_RECONNECT_WINDOW_SECONDS = 2.0
 _RECONNECT_STABLE_SECONDS = 15.0
-=======
->>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 
 
 def _track_pending_connection(sock) -> None:
@@ -1356,11 +1349,7 @@ def _handle_incoming(msg: dict, heartbeat: _HeartbeatMonitor | None = None) -> N
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _connect_loop(generation: int | None = None) -> None:
-<<<<<<< HEAD
     """Daemon thread: retries within a bounded window after connection loss."""
-=======
-    """Daemon thread: endlessly tries to connect to the Windows agent."""
->>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
     host  = CONFIG["windows_host"]
     port  = CONFIG["port"]
     token = CONFIG["token"]
@@ -1384,7 +1373,7 @@ def _connect_loop(generation: int | None = None) -> None:
         remaining = retry_deadline - time.monotonic()
         if remaining <= 0:
             message = (
-                "Automatic reconnect stopped after 2 minutes. "
+                "Automatic reconnect stopped after 2 seconds. "
                 "Click Retry Connection to try again, or Disconnect to stop Mousehare."
             )
             log.info("[NETWORK] %s", message)
@@ -1416,7 +1405,10 @@ def _connect_loop(generation: int | None = None) -> None:
                         s.setsockopt(socket.IPPROTO_TCP, option, value)
                     except OSError:
                         log.debug("[NETWORK] Could not set %s", option_name)
-            s.settimeout(5.0)
+            # Keep a pending connection attempt inside the same short retry
+            # window. A fixed 5-second socket timeout would overrun the user's
+            # 2-second reconnect limit when Windows is already offline.
+            s.settimeout(min(5.0, max(0.1, remaining)))
             s.connect((host, port))
             if not still_current():
                 s.close()
@@ -1464,17 +1456,12 @@ def _connect_loop(generation: int | None = None) -> None:
             recv_t.start()
             recv_t.join()   # blocks until connection is lost
             if still_current():
-<<<<<<< HEAD
                 # Only grant a fresh recovery window after a genuinely stable
                 # session. Repeated short connect/drop cycles must consume the
                 # same bounded window instead of extending reconnect forever.
                 session_duration = time.monotonic() - connected_at
                 if session_duration >= _RECONNECT_STABLE_SECONDS:
                     retry_deadline = time.monotonic() + _AUTO_RECONNECT_WINDOW_SECONDS
-=======
-                retry_deadline = time.monotonic() + _AUTO_RECONNECT_WINDOW_SECONDS
-                if time.monotonic() - connected_at >= 15.0:
->>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
                     retry_delay = 1.0
 
         except HandshakeError as exc:
@@ -1501,8 +1488,12 @@ def _connect_loop(generation: int | None = None) -> None:
             _clear_pending_connection(s)
 
         if still_current():
-            log.info("[NETWORK] Reconnecting in %.1f s...", retry_delay)
-            if _quit_event.wait(retry_delay):
+            remaining = retry_deadline - time.monotonic()
+            if remaining <= 0:
+                continue
+            wait_time = min(retry_delay, remaining)
+            log.info("[NETWORK] Reconnecting in %.1f s...", wait_time)
+            if _quit_event.wait(wait_time):
                 break
             retry_delay = min(5.0, retry_delay * 2.0)
 

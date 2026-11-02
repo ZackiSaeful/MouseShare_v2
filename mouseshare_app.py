@@ -347,7 +347,8 @@ class MousehareApp:
             "Mousehare.Nav.TButton",
             background=p["panel"], foreground=p["text"],
             bordercolor=p["panel"], lightcolor=p["panel"],
-            darkcolor=p["panel"], focuscolor=p["accent"], padding=(14, 12), anchor="w",
+            darkcolor=p["panel"], focuscolor=p["accent"], focusthickness=0,
+            padding=(14, 12), anchor="w",
             relief="flat", font=("Arial", 11),
         )
         style.map(
@@ -362,11 +363,44 @@ class MousehareApp:
             "Mousehare.NavSelected.TButton",
             background=p["accent"], foreground="#18130F",
             bordercolor=p["accent"], lightcolor=p["accent"],
-            darkcolor=p["accent"], focuscolor=p["accent"], padding=(14, 12), anchor="w",
+            darkcolor=p["accent"], focuscolor=p["accent"], focusthickness=0,
+            padding=(14, 12), anchor="w",
             relief="flat", font=("Arial", 11, "bold"),
         )
         style.map(
             "Mousehare.NavSelected.TButton",
+            background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"])],
+            foreground=[("pressed", "#18130F"), ("active", "#18130F")],
+            bordercolor=[("focus", p["accent"]), ("alternate", p["accent"])],
+            lightcolor=[("focus", p["accent"])],
+            darkcolor=[("focus", p["accent"])],
+        )
+        style.configure(
+            "Mousehare.SubNav.TButton",
+            background=p["panel2"], foreground=p["text"],
+            bordercolor=p["line"], lightcolor=p["panel2"],
+            darkcolor=p["line"], focuscolor=p["accent"], focusthickness=0,
+            padding=(14, 12), anchor="w",
+            relief="flat", font=("Arial", 11),
+        )
+        style.map(
+            "Mousehare.SubNav.TButton",
+            background=[("pressed", "#422D19"), ("active", p["line"])],
+            foreground=[("pressed", p["accent_hi"]), ("active", p["text"])],
+            bordercolor=[("focus", p["accent"]), ("alternate", p["line"])],
+            lightcolor=[("focus", p["accent"])],
+            darkcolor=[("focus", p["accent"])],
+        )
+        style.configure(
+            "Mousehare.SubNavSelected.TButton",
+            background=p["accent"], foreground="#18130F",
+            bordercolor=p["accent"], lightcolor=p["accent_hi"],
+            darkcolor=p["accent"], focuscolor=p["accent"], focusthickness=0,
+            padding=(14, 12), anchor="w",
+            relief="flat", font=("Arial", 11, "bold"),
+        )
+        style.map(
+            "Mousehare.SubNavSelected.TButton",
             background=[("pressed", p["accent_hi"]), ("active", p["accent_hi"])],
             foreground=[("pressed", "#18130F"), ("active", "#18130F")],
             bordercolor=[("focus", p["accent"]), ("alternate", p["accent"])],
@@ -920,25 +954,19 @@ class MousehareApp:
         self._title("Settings", "Network, pairing and appearance preferences")
         body = tk.Frame(self.content, bg=p["bg"])
         body.pack(fill="both", expand=True)
-        nav = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightcolor=p["line"],
+        nav = tk.Frame(body, width=170, bg=p["panel"], highlightbackground=p["line"], highlightcolor=p["line"],
                        highlightthickness=1, takefocus=0)
         nav.pack(side="left", fill="y", padx=(0, 10))
+        nav.pack_propagate(False)
         for section in ("General", "Network", "Security", "Appearance"):
             is_active = section == self.settings_section
-            btn = tk.Button(
+            btn = ttk.Button(
                 nav, text=section,
-                bg=p["accent"] if is_active else p["panel2"],
-                fg="#18130F" if is_active else p["text"],
-                activebackground=p["accent_hi"] if is_active else p["line"],
-                activeforeground="#18130F" if is_active else p["text"],
-                disabledforeground=p["disabled"],
-                relief="flat", borderwidth=0, highlightthickness=0,
-                padx=14, pady=12, anchor="w",
-                font=("Arial", 11, "bold" if is_active else "normal"),
+                style="Mousehare.SubNavSelected.TButton" if is_active else "Mousehare.SubNav.TButton",
                 command=lambda value=section: self._set_settings_section(value),
                 cursor="hand2",
             )
-            btn.pack(fill="x", padx=4, pady=2)
+            btn.pack(fill="x", padx=8, pady=4)
         self.settings_content = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightcolor=p["line"],
                                          highlightthickness=1, takefocus=0)
         self.settings_content.pack(side="left", fill="both", expand=True)

@@ -1,0 +1,1 @@
+"""macOS Mousehare client agent."""

@@ -924,9 +924,16 @@ class MousehareApp:
         nav.pack(side="left", fill="y", padx=(0, 10))
         for section in ("General", "Network", "Security", "Appearance"):
             is_active = section == self.settings_section
-            btn = ttk.Button(
+            btn = tk.Button(
                 nav, text=section,
-                style="Mousehare.NavSelected.TButton" if is_active else "Mousehare.Nav.TButton",
+                bg=p["accent"] if is_active else p["panel2"],
+                fg="#18130F" if is_active else p["text"],
+                activebackground=p["accent_hi"] if is_active else p["line"],
+                activeforeground="#18130F" if is_active else p["text"],
+                disabledforeground=p["disabled"],
+                relief="flat", borderwidth=0, highlightthickness=0,
+                padx=14, pady=12, anchor="w",
+                font=("Arial", 11, "bold" if is_active else "normal"),
                 command=lambda value=section: self._set_settings_section(value),
                 cursor="hand2",
             )

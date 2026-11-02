@@ -836,12 +836,13 @@ class MousehareApp:
 
     def _mode_card(self, parent, title, subtitle, selected, enabled=True):
         p = self.palette
-        bg = p["accent"] if selected else (p["panel2"] if enabled else p["panel"])
-        fg = "#18130F" if selected else (p["text"] if enabled else p["disabled"])
-        dim = "#4B2E17" if selected else (p["muted"] if enabled else p["disabled"])
+        bg = p["panel2"] if (selected or enabled) else p["panel"]
+        fg = p["accent"] if selected else (p["text"] if enabled else p["disabled"])
+        dim = p["muted"] if (selected or enabled) else p["disabled"]
         border_c = p["accent"] if selected else p["line"]
+        thickness = 2 if selected else 1
         frame = tk.Frame(parent, bg=bg, highlightbackground=border_c, highlightcolor=border_c,
-                         highlightthickness=1, takefocus=0)
+                         highlightthickness=thickness, takefocus=0)
         tk.Label(frame, text=title.upper(), bg=bg, fg=fg,
                  font=("Arial", 11, "bold")).pack(anchor="w", padx=13, pady=(9, 0))
         tk.Label(frame, text=subtitle, bg=bg, fg=dim,
@@ -1311,6 +1312,11 @@ class MousehareApp:
         hint = self.mac_position_hint
         if hint is not None and hint.winfo_exists():
             hint.configure(text=self._mac_position_summary())
+        canvas = getattr(self, "link_canvas", None)
+        if canvas is not None and canvas.winfo_exists():
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            self._paint_link(canvas, w if w > 50 else 420, h if h > 50 else 168)
         self._set_status("disconnected", f"Position saved. {self._mac_position_summary()}")
 
     def _regenerate_token(self) -> None:

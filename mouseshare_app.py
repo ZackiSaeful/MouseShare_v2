@@ -960,6 +960,7 @@ class MousehareApp:
         nav.pack_propagate(False)
         for section in ("General", "Network", "Security", "Appearance"):
             is_active = section == self.settings_section
+<<<<<<< HEAD
             # Canvas primitives keep the palette under app control. Aqua can
             # ignore background colors on native Button widgets and paint them
             # white, which is why ttk.Button and tk.Button both failed here.
@@ -994,6 +995,14 @@ class MousehareApp:
             btn.bind("<Button-1>", lambda _event, value=section:
                      self._set_settings_section(value))
             draw_button()
+=======
+            btn = ttk.Button(
+                nav, text=section,
+                style="Mousehare.SubNavSelected.TButton" if is_active else "Mousehare.SubNav.TButton",
+                command=lambda value=section: self._set_settings_section(value),
+                cursor="hand2",
+            )
+>>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
             btn.pack(fill="x", padx=8, pady=4)
         self.settings_content = tk.Frame(body, bg=p["panel"], highlightbackground=p["line"], highlightcolor=p["line"],
                                          highlightthickness=1, takefocus=0)

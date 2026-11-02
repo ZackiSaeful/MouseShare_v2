@@ -7,8 +7,12 @@ Metode Audit    : Comprehensive Static Code Analysis (Strict Read-Only)
 Waktu Mulai     : 2026-11-02 08:03:35 WIB (UTC+7)
 Waktu Selesai   : 2026-11-02 08:14:00 WIB (UTC+7)
 Auditor         : Antigravity Advanced Defensive Security Auditor
+<<<<<<< HEAD
 Status Kode     : Kode tidak diubah selama audit awal (08:03-08:14 WIB);
                   perubahan setelah audit awal dicatat di addendum.
+=======
+Status Kode     : Tidak ada satu karakter pun kode yang diubah / dimodifikasi.
+>>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 ================================================================================
 
 1. IDENTITAS PROYEK DAN LOKASI FOLDER
@@ -520,11 +524,17 @@ SHA256: 4addf28393dfb393344bafea41aa945905f5cbfc63c15f4e81010cd1af71eaa5 [MATCH 
 
 11. KESIMPULAN AKHIR
 --------------------------------------------------------------------------------
+<<<<<<< HEAD
 Berdasarkan file dan cakupan yang berhasil diperiksa selama audit awal (08:03-08:14 WIB),
 tidak ditemukan indikasi malware, virus, trojan, backdoor, perintah tersembunyi,
 pencurian data, exfiltrasi jaringan, atau mekanisme persistensi tersembunyi.
 Kesimpulan ini terbatas pada snapshot audit tersebut dan bukan jaminan proyek bebas
 dari malware atau kerentanan.
+=======
+Kode proyek Mousehare pada macOS BERSIH DARI MALWARE, VIRUS, TROJAN, BACKDOOR, ATAUPUN
+PERINTAH TERSEMBUNYI. Tidak ada aktivitas pencurian data, exfiltrasi jaringan, atau
+mekanisme persistensi tersembunyi.
+>>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 
 Pola hooking sistem tingkat rendah (CGEventTap) yang digunakan adalah mekanisme sah
 dan standar untuk aplikasi KVM sharing lintas sistem operasi. Celah keamanan yang
@@ -532,6 +542,7 @@ teridentifikasi merupakan kelemahan arsitektur/konfigurasi (seperti token templa
 dukungan unencrypted legacy protocol, dan kurangnya filter transient clipboard untuk
 password manager) yang telah dicatat lengkap dengan bukti kode dan rekomendasi remidiasi.
 
+<<<<<<< HEAD
 Selama pelaksanaan audit awal, integritas file proyek dipertahankan tanpa modifikasi
 kode. Perubahan yang terjadi setelah audit awal dijelaskan di Addendum 12.
 ================================================================================
@@ -600,4 +611,9 @@ malware pada addendum ini.
 
 ================================================================================
                            AKHIR DOKUMEN DAN ADDENDUM
+=======
+Seluruh integritas file proyek dipertahankan dalam kondisi aslinya tanpa modifikasi kode.
+================================================================================
+                                AKHIR DOKUMEN
+>>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 ================================================================================

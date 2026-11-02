@@ -500,9 +500,13 @@ _HANDOFF_RELEASE_MARKER = 0x4D534852
 # is powered off.  The encrypted application heartbeat gives the Mac a short,
 # deterministic fail-safe window; TCP keepalive is retained as a second layer.
 _HEARTBEAT_INTERVAL_SECONDS = 1.0
+<<<<<<< HEAD
 # Allow brief Wi-Fi / scheduler stalls without treating a healthy session as
 # dead. This remains a short fail-safe if the Windows host powers off silently.
 _HEARTBEAT_TIMEOUT_SECONDS = 8.0
+=======
+_HEARTBEAT_TIMEOUT_SECONDS = 3.5
+>>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 
 
 def _main_display_geometry() -> tuple[float, float, float, float]:
@@ -1178,7 +1182,10 @@ _connection_loss_pending = False
 _pending_connection_lock = threading.Lock()
 _pending_connection_socket = None
 _AUTO_RECONNECT_WINDOW_SECONDS = 120.0
+<<<<<<< HEAD
 _RECONNECT_STABLE_SECONDS = 15.0
+=======
+>>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
 
 
 def _track_pending_connection(sock) -> None:
@@ -1349,7 +1356,11 @@ def _handle_incoming(msg: dict, heartbeat: _HeartbeatMonitor | None = None) -> N
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _connect_loop(generation: int | None = None) -> None:
+<<<<<<< HEAD
     """Daemon thread: retries within a bounded window after connection loss."""
+=======
+    """Daemon thread: endlessly tries to connect to the Windows agent."""
+>>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
     host  = CONFIG["windows_host"]
     port  = CONFIG["port"]
     token = CONFIG["token"]
@@ -1453,12 +1464,17 @@ def _connect_loop(generation: int | None = None) -> None:
             recv_t.start()
             recv_t.join()   # blocks until connection is lost
             if still_current():
+<<<<<<< HEAD
                 # Only grant a fresh recovery window after a genuinely stable
                 # session. Repeated short connect/drop cycles must consume the
                 # same bounded window instead of extending reconnect forever.
                 session_duration = time.monotonic() - connected_at
                 if session_duration >= _RECONNECT_STABLE_SECONDS:
                     retry_deadline = time.monotonic() + _AUTO_RECONNECT_WINDOW_SECONDS
+=======
+                retry_deadline = time.monotonic() + _AUTO_RECONNECT_WINDOW_SECONDS
+                if time.monotonic() - connected_at >= 15.0:
+>>>>>>> 096864aa7b25ca951c413e8dba7161b49037c9b9
                     retry_delay = 1.0
 
         except HandshakeError as exc:
